@@ -1,0 +1,20 @@
+# Built places / locks
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+
+# Don't commit random model dumps; keep commissioned map assets
+*.rbxm
+*.rbxmx
+!map/**
+!map/**/*.rbxm
+!map/**/*.rbxmx
+
+sourcemap.json
+logs/*.log
+!logs/.gitkeep
+logs/profiles/
+_rewrite_backup/
+*.zip
+*.lock

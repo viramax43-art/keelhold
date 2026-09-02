@@ -1,0 +1,8 @@
+[2026-08-30T12:52:40Z INFO  rbxlx_to_rojo] rbxlx-to-rojo 1.0.1
+[2026-08-30T12:52:40Z INFO  rbxlx_to_rojo] Select a place file.
+[2026-08-30T12:52:40Z INFO  rbxlx_to_rojo] Opening place file
+[2026-08-30T12:52:40Z INFO  rbxlx_to_rojo] Decoding place file, this is the longest part...
+[2026-08-30T12:52:40Z WARN  rbx_binary::deserializer] Unknown value type ID 0x21 (33) in Roblox binary model file. Found in property AnimationRigData.Capabilities.
+[2026-08-30T12:52:40Z WARN  rbx_binary::deserializer] Unknown value type ID 0x1f (31) in Roblox binary model file. Found in property AnimationRigData.HistoryId.
+An error occurred while using rbxlx-to-rojo.
+While attempting to decode the place file, at Type mismatch: Property Animator.Tags should be SharedString, but it was BinaryString rbx_binary didn't know what to do

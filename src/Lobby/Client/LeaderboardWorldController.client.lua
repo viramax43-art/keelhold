@@ -1,0 +1,1 @@
+-- Placeholder: world leaderboard can bind to WoodenLeaderboard SurfaceGui later.

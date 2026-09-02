@@ -1,0 +1,183 @@
+--[[
+	BotService — защитники: слот 1 аватар, остальные kit.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
+local MapBind = require(ReplicatedStorage.Shared.Map.MapBind)
+local AvatarClone = require(ReplicatedStorage.Shared.Builders.AvatarClone)
+local SquadUnitBuilder = require(ReplicatedStorage.Shared.Builders.SquadUnitBuilder)
+local CharacterRigBuilder = require(ReplicatedStorage.Shared.Builders.CharacterRigBuilder)
+local StatCalculator = require(ReplicatedStorage.Shared.Util.StatCalculator)
+local CombatRange = require(ReplicatedStorage.Shared.Util.CombatRange)
+local ProfileTemplate = require(ReplicatedStorage.Shared.Util.ProfileTemplate)
+local Util = require(ReplicatedStorage.Shared.Util.Util)
+local AccuracyHelper = require(ReplicatedStorage.Shared.Util.AccuracyHelper)
+local CombatVFX = require(ReplicatedStorage.Shared.Util.CombatVFX)
+local Log = require(ReplicatedStorage.Shared.Util.Log)
+
+local BotService = {}
+local DataService, WaveService, EnemyService
+
+function BotService.GetDefenseCFrame(position: Vector3): CFrame
+	return MapBind.GetDefenseCFrame(position)
+end
+
+local function createKit(slotIndex, position, stats, profile)
+	local kit = CharacterRigBuilder.GetKitVariant(slotIndex + 1)
+	local weaponType = stats.WeaponType or "Rifle"
+	return SquadUnitBuilder.CreateDefenderModel({
+		SlotIndex = slotIndex,
+		Position = position,
+		FacingCFrame = BotService.GetDefenseCFrame(position),
+		DisplayName = string.format("Спецназ-%d | %s", slotIndex, weaponType),
+		WeaponType = weaponType,
+		CurrentHP = stats.MaxHP,
+		MaxHP = stats.MaxHP,
+		IsBot = true,
+		ModelName = "Bot_Slot" .. slotIndex,
+		Parent = workspace:FindFirstChild("Squad") or workspace,
+		UniformColor = kit.Uniform,
+		VestColor = kit.Vest,
+		HelmetColor = kit.Helmet,
+	})
+end
+
+local function buildRecord(model, slotIndex, stats, hostPlayer)
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.MaxHealth = stats.MaxHP
+		humanoid.Health = stats.MaxHP
+	end
+	CharacterRigBuilder.UpdateHealthBar(model, stats.MaxHP, stats.MaxHP)
+	return {
+		Id = "Bot_" .. slotIndex,
+		SlotIndex = slotIndex,
+		Model = model,
+		Root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart"),
+		DefensePosition = model:GetPivot().Position,
+		CurrentHP = stats.MaxHP,
+		MaxHP = stats.MaxHP,
+		Armor = stats.Armor,
+		Damage = stats.Damage,
+		FireRate = stats.FireRate,
+		Range = CombatRange.GetDefenseEngageRange(stats.Range),
+		Accuracy = stats.Accuracy,
+		WeaponType = stats.WeaponType,
+		LastFire = 0,
+		IsBot = true,
+		HostPlayer = hostPlayer,
+		Alive = true,
+	}
+end
+
+function BotService.StartBotAI(bot)
+	task.spawn(function()
+		while bot.Alive and bot.Model and bot.Model.Parent do
+			task.wait(0.15)
+			if not EnemyService or not bot.Root then
+				continue
+			end
+			local now = os.clock()
+			if now - (bot.LastFire or 0) < (bot.FireRate or 0.3) then
+				continue
+			end
+			local target = EnemyService.FindNearestEnemy(bot.Root.Position, bot.Range or 200)
+			if not target or not target.Root then
+				continue
+			end
+			bot.LastFire = now
+			local origin = bot.Root.Position + Vector3.new(0, 1.5, 0)
+			local aim = target.Root.Position + Vector3.new(0, 1, 0)
+			CombatVFX.PlayMuzzle(origin, aim)
+			if AccuracyHelper.RollHit(bot.Accuracy) then
+				EnemyService.DamageEnemy(target, bot.Damage or 10, bot.HostPlayer)
+			end
+		end
+	end)
+end
+
+function BotService.DamageBot(bot, amount: number)
+	if not bot or not bot.Alive then
+		return
+	end
+	local mitigated = math.max(1, amount - (bot.Armor or 0) * 0.25)
+	bot.CurrentHP = math.max(0, (bot.CurrentHP or 0) - mitigated)
+	CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, bot.MaxHP)
+	local hum = bot.Model and bot.Model:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.Health = bot.CurrentHP
+	end
+	if bot.CurrentHP <= 0 then
+		bot.Alive = false
+		Log.Write("Wave", "Defender died: " .. tostring(bot.Id))
+		if bot.Model then
+			bot.Model:Destroy()
+		end
+		if WaveService and WaveService.OnDefenderDied then
+			WaveService.OnDefenderDied(bot)
+		end
+	end
+end
+
+function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })
+	local profile = DataService and DataService.GetProfile(hostPlayer)
+	if not profile then
+		profile = Util.ReconcileProfile(nil, ProfileTemplate)
+	end
+
+	local botCount = GameConfig.DefenseBotCount or 4
+	local squad = workspace:FindFirstChild("Squad")
+	if not squad then
+		squad = Instance.new("Folder")
+		squad.Name = "Squad"
+		squad.Parent = workspace
+	end
+
+	local bots = {}
+	for slotIndex = 1, botCount do
+		local pos = defensePositions[slotIndex] or defensePositions[1] or Vector3.new(0, 5, 0)
+		local stats = StatCalculator.BuildCombatStats(profile, slotIndex)
+
+		if slotIndex == 1 then
+			task.spawn(function()
+				local facing = BotService.GetDefenseCFrame(pos)
+				local clone = AvatarClone.Create(hostPlayer, slotIndex, facing, stats)
+				local model = clone
+				if not model then
+					Log.Write("Bot", "Avatar clone failed for slot 1, using kit fallback", "WARN")
+					model = createKit(slotIndex, pos, stats, profile)
+				end
+				if model then
+					local bot = buildRecord(model, slotIndex, stats, hostPlayer)
+					BotService.StartBotAI(bot)
+					if WaveService and WaveService.RegisterBot then
+						WaveService.RegisterBot(bot)
+					end
+					Log.Write("Bot", string.format("Bot slot %d weapon=%s skin=%s", slotIndex, stats.WeaponType, clone and "avatar" or "kit"))
+				end
+			end)
+		else
+			local model = createKit(slotIndex, pos, stats, profile)
+			if model then
+				local bot = buildRecord(model, slotIndex, stats, hostPlayer)
+				table.insert(bots, bot)
+				BotService.StartBotAI(bot)
+				if WaveService and WaveService.RegisterBot then
+					WaveService.RegisterBot(bot)
+				end
+				Log.Write("Bot", string.format("Bot slot %d at %s weapon=%s skin=kit", slotIndex, tostring(pos), stats.WeaponType))
+			end
+		end
+	end
+	Log.Write("Bot", "Spawned " .. botCount .. " defense bots")
+	return bots
+end
+
+function BotService:Init(services)
+	DataService = services.DataService
+	WaveService = services.WaveService
+	EnemyService = services.EnemyService
+end
+
+return BotService

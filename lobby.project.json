@@ -1,0 +1,54 @@
+{
+  "name": "BridgeDefense-Commission",
+  "tree": {
+    "$className": "DataModel",
+    "HttpService": {
+      "$className": "HttpService",
+      "$properties": {
+        "HttpEnabled": true
+      }
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/Shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/Server"
+      },
+      "Lobby": {
+        "$path": "src/Lobby/Server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/Client"
+        },
+        "Lobby": {
+          "$path": "src/Lobby/Client"
+        }
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "Terrain": {
+        "$path": "map/Terrain.rbxm"
+      },
+      "CommissionMap": {
+        "$path": "map/CommissionMap.rbxm"
+      }
+    },
+    "Lighting": {
+      "$className": "Lighting",
+      "CommissionLighting": {
+        "$path": "map/CommissionLighting.rbxm"
+      }
+    }
+  }
+}
