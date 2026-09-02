@@ -5,12 +5,15 @@ local CoopMultiplier = {}
 
 function CoopMultiplier.Compute(friendCount: number): number
 	local cfg = GameConfig.CoopMultiplier
-	friendCount = math.clamp(friendCount or 0, 0, cfg.MaxFriends or 3)
+	friendCount = math.clamp(math.floor(friendCount or 0), 0, 3)
 	if friendCount <= 0 then
 		return cfg.Solo or 1
 	end
-	local m = (cfg.Base or 1.1) + (cfg.PerFriend or 0.1) * friendCount
-	return math.min(m, cfg.MaxMultiplier or 1.4)
+	local value = cfg[friendCount]
+	if typeof(value) == "number" then
+		return value
+	end
+	return cfg.Solo or 1
 end
 
 return CoopMultiplier

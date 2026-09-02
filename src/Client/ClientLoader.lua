@@ -3,6 +3,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ClientLoader = {}
 local ready = false
@@ -19,9 +20,13 @@ function ClientLoader.EnsureReady()
 		UIController:Init()
 	end
 
+	local remotes = ReplicatedStorage:WaitForChild("Remotes", 20)
 	local MenuController = require(controllers:WaitForChild("MenuController"))
 	if MenuController.Init then
-		MenuController:Init()
+		MenuController:Init({
+			Remotes = remotes,
+			UI = UIController.ScreenGui,
+		})
 	end
 
 	ready = true

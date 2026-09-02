@@ -33,9 +33,47 @@ function Util.ReconcileProfile(profile, template)
 	return result
 end
 
-function Util.LevelFromTotalXP(totalXP: number, xpPerLevel: number): number
-	xpPerLevel = math.max(1, xpPerLevel or 100)
-	return math.max(1, math.floor((totalXP or 0) / xpPerLevel) + 1)
+function Util.XPForLevel(level: number, baseXP: number?, growth: number?): number
+	baseXP = math.max(1, baseXP or 150)
+	growth = growth or 1.15
+	level = math.max(1, level)
+	return math.floor(baseXP * (growth ^ (level - 1)))
+end
+
+function Util.LevelFromTotalXP(totalXP: number, xpPerLevel: number?, growth: number?): number
+	totalXP = totalXP or 0
+	xpPerLevel = math.max(1, xpPerLevel or 150)
+	growth = growth or 1.15
+	local level = 1
+	local remaining = totalXP
+	-- Cap iterations to avoid infinite loop
+	for _ = 1, 500 do
+		local need = Util.XPForLevel(level, xpPerLevel, growth)
+		if remaining < need then
+			break
+		end
+		remaining -= need
+		level += 1
+	end
+	return level
+end
+
+function Util.XPProgressInLevel(totalXP: number, xpPerLevel: number?, growth: number?): (number, number, number)
+	totalXP = totalXP or 0
+	xpPerLevel = math.max(1, xpPerLevel or 150)
+	growth = growth or 1.15
+	local level = 1
+	local remaining = totalXP
+	for _ = 1, 500 do
+		local need = Util.XPForLevel(level, xpPerLevel, growth)
+		if remaining < need then
+			return level, remaining, need
+		end
+		remaining -= need
+		level += 1
+	end
+	local need = Util.XPForLevel(level, xpPerLevel, growth)
+	return level, 0, need
 end
 
 return Util

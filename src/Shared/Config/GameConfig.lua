@@ -19,14 +19,12 @@ local GameConfig = {
 	-- Сколько ботов-защитников на мосту (всегда; игроки летают и не умирают)
 	DefenseBotCount = 4,
 
-	-- Кооп-множитель наград: M = BaseCoopMultiplier + CoopPerFriend * (кол-во друзей в пати)
-	-- Соло (все слоты — боты): SoloMultiplier
+	-- Кооп-множитель по ТЗ: Solo 1.0 / 1 друг 1.2 / 2 1.3 / 3 1.5
 	CoopMultiplier = {
-		Base = 1.1,
-		PerFriend = 0.1,
 		Solo = 1.0,
-		MaxFriends = 3,
-		MaxMultiplier = 1.4,
+		[1] = 1.2,
+		[2] = 1.3,
+		[3] = 1.5,
 	},
 
 	-- Чекпоинты каждые N волн
@@ -99,14 +97,15 @@ local GameConfig = {
 
 	-- Бой на мосту: защитники стреляют по длине моста; враги идут по waypoints
 	Battle = {
-		DefenseEngageRange = 320,
-		PlayerEngageRange = 320,
-		WaveStartDelay = 0.2,
-		EnemySpawnInterval = 0.35,
+		DefenseEngageRange = 350,
+		PlayerEngageRange = 350,
+		WaveStartDelay = 1.5,
+		EnemySpawnInterval = 0.6,
 	},
 
-	-- XP за уровень (для отображения, считается от TotalXP)
-	XPPerLevel = 100,
+	-- XP за уровень (экспоненциальный рост через XPPerLevelGrowth)
+	XPPerLevel = 150,
+	XPPerLevelGrowth = 1.15,
 
 	-- Бонус за прохождение волны (поверх наград за убийства)
 	WaveRewards = {

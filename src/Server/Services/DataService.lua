@@ -20,6 +20,24 @@ local store = nil
 local RemoteService = nil
 local STUDIO_URL = "http://127.0.0.1:8765/profile/"
 local saveDebounce = {}
+local lastSaveClock = {}
+
+local function safeCall(fn, ...)
+	local args = table.pack(...)
+	for attempt = 1, 3 do
+		local ok, result = pcall(function()
+			return fn(table.unpack(args, 1, args.n))
+		end)
+		if ok then
+			return true, result
+		end
+		Log.Write("Data", string.format("Attempt %d failed: %s", attempt, tostring(result)), "WARN")
+		if attempt < 3 then
+			task.wait(1 * attempt)
+		end
+	end
+	return false, nil
+end
 
 local function getStore()
 	if store ~= nil then
@@ -71,9 +89,7 @@ local function loadProfile(player: Player)
 	local ds = getStore()
 	if ds then
 		for attempt = 1, 3 do
-			local ok, data = pcall(function()
-				return ds:GetAsync(tostring(userId))
-			end)
+			local ok, data = safeCall(ds.GetAsync, ds, tostring(userId))
 			if ok then
 				raw = data
 				break
@@ -87,7 +103,7 @@ local function loadProfile(player: Player)
 		end
 	end
 	local profile = Util.ReconcileProfile(raw, ProfileTemplate)
-	profile.Level = Util.LevelFromTotalXP(profile.TotalXP or 0, GameConfig.XPPerLevel)
+	profile.Level = Util.LevelFromTotalXP(profile.TotalXP or 0, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
 	profiles[userId] = profile
 	return profile
 end
@@ -113,11 +129,18 @@ function DataService.SaveProfile(player: Player, immediate: boolean?)
 		end)
 		return
 	end
+	local now = os.clock()
+	-- Rate-limit non-critical forced saves (leave/BindToClose still pass if >0.5s apart)
+	if lastSaveClock[userId] and (now - lastSaveClock[userId]) < 0.5 then
+		return
+	end
+	lastSaveClock[userId] = now
 	local ds = getStore()
 	if ds then
-		pcall(function()
-			ds:SetAsync(tostring(userId), profile)
-		end)
+		local ok = safeCall(ds.SetAsync, ds, tostring(userId), profile)
+		if not ok then
+			Log.Write("Data", "CRITICAL: Failed to save profile for " .. player.Name, "ERROR")
+		end
 	elseif RunService:IsStudio() then
 		studioSave(userId, profile)
 	end
@@ -148,7 +171,7 @@ function DataService.AddXP(player: Player, amount: number, reason: string?)
 	end
 	profile.XP = (profile.XP or 0) + amount
 	profile.TotalXP = (profile.TotalXP or 0) + amount
-	profile.Level = Util.LevelFromTotalXP(profile.TotalXP, GameConfig.XPPerLevel)
+	profile.Level = Util.LevelFromTotalXP(profile.TotalXP, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
 	Log.Write("XP", string.format("%s %+d (%s) XP=%d Lv=%d", player.Name, amount, reason or "?", profile.XP, profile.Level))
 	DataService.NotifyProfile(player)
 	DataService.SaveProfile(player, false)

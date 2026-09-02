@@ -94,7 +94,8 @@ function WaveService.OnEnemyDied()
 		return
 	end
 	fireWaveUpdated()
-	if EnemyService.GetAliveCount() <= 0 and battleState.SpawningDone then
+	if battleState.SpawningDone and not battleState.WaveClearing and EnemyService.GetAliveCount() <= 0 then
+		battleState.WaveClearing = true
 		WaveService.OnWaveCleared()
 	end
 end
@@ -114,6 +115,7 @@ function WaveService.OnWaveCleared()
 	if not battleState or not battleState.Active then
 		return
 	end
+	battleState.WaveClearing = true
 	local wave = battleState.Wave
 	local players = alivePlayers(battleState.Players)
 	RewardService.GrantWaveClear(players, wave)
@@ -175,6 +177,7 @@ function WaveService.BeginWave(wave: number)
 	end
 	battleState.Wave = wave
 	battleState.SpawningDone = false
+	battleState.WaveClearing = false
 	RewardService.ClearWaveStats()
 	local diff = GameConfig.Difficulties[battleState.Difficulty or "Normal"]
 	local mult = (diff and diff.EnemyStatMultiplier) or 1
@@ -184,13 +187,13 @@ function WaveService.BeginWave(wave: number)
 			return
 		end
 		EnemyService.SpawnWave(wave, mult)
-		-- mark spawning done after estimated spawn window
 		local count = require(ReplicatedStorage.Shared.Util.WaveScaling).EnemyCount(wave)
 		local interval = (GameConfig.Battle and GameConfig.Battle.EnemySpawnInterval) or 0.35
 		task.delay(count * interval + 0.5, function()
-			if battleState then
+			if battleState and battleState.Active then
 				battleState.SpawningDone = true
-				if EnemyService.GetAliveCount() <= 0 then
+				if not battleState.WaveClearing and EnemyService.GetAliveCount() <= 0 then
+					battleState.WaveClearing = true
 					WaveService.OnWaveCleared()
 				end
 			end
@@ -275,6 +278,14 @@ function WaveService:Init(services)
 		for i = #battleState.Players, 1, -1 do
 			if battleState.Players[i] == player then
 				table.remove(battleState.Players, i)
+			end
+		end
+		if #battleState.Players > 0 then
+			local newHost = battleState.Players[1]
+			for _, bot in ipairs(battleState.Bots) do
+				if bot.HostPlayer == player then
+					bot.HostPlayer = newHost
+				end
 			end
 		end
 		if #alivePlayers(battleState.Players) == 0 and battleState.Active then

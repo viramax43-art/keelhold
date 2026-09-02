@@ -4,39 +4,44 @@
 
 local EnemiesConfig = {
 	BaseStats = {
-		HP = 80,
-		Damage = 10,
-		FireRate = 0.5,
-		Accuracy = 0.65,
+		HP = 60,
+		Damage = 8,
+		FireRate = 0.6,
+		Accuracy = 0.55,
 		Armor = 0,
-		WalkSpeed = 14,
+		WalkSpeed = 12,
 	},
 
-	-- Множители за каждую волну (волна 1 = базовые статы)
 	PerWaveScaling = {
-		HP = 0.08, -- +8% HP за волну
-		Damage = 0.05,
-		FireRate = -0.01, -- быстрее стреляют (меньше интервал)
-		Accuracy = 0.008,
-		Armor = 0.5, -- +0.5 брони за волну
-		WalkSpeed = 0.003,
+		HP = 0.12,
+		Damage = 0.035,
+		FireRate = -0.008,
+		Accuracy = 0.006,
+		Armor = 0.6,
+		WalkSpeed = 0.002,
 	},
 
-	-- Минимальный интервал между выстрелами врага
 	MinFireRate = 0.15,
 
-	-- Награды за убийство (до кооп-множителя и difficulty)
 	Rewards = {
 		Gold = 12,
 		XP = 8,
 	},
 
-	-- Типы оружия у врагов (циклически по индексу моба)
 	WeaponRotation = { "Pistol", "SMG", "Rifle", "Shotgun", "LMG", "Sniper", "Revolver", "Crossbow" },
 
-	-- Стреляют на подходе (но не со всего моста ≈320 — иначе не идут)
+	EnemyTypes = {
+		Pistol = { DamageMult = 0.8, HPMult = 0.9, SpeedMult = 1.05, AccuracyMod = -0.05 },
+		SMG = { DamageMult = 0.7, HPMult = 0.85, SpeedMult = 1.1, AccuracyMod = -0.1 },
+		Rifle = { DamageMult = 1.0, HPMult = 1.0, SpeedMult = 1.0, AccuracyMod = 0 },
+		Shotgun = { DamageMult = 1.3, HPMult = 1.1, SpeedMult = 0.9, AccuracyMod = -0.15 },
+		LMG = { DamageMult = 1.1, HPMult = 1.2, SpeedMult = 0.85, AccuracyMod = 0.05 },
+		Sniper = { DamageMult = 1.5, HPMult = 0.8, SpeedMult = 0.8, AccuracyMod = 0.1 },
+		Revolver = { DamageMult = 1.15, HPMult = 0.95, SpeedMult = 1.0, AccuracyMod = 0 },
+		Crossbow = { DamageMult = 1.2, HPMult = 0.9, SpeedMult = 0.95, AccuracyMod = 0.05 },
+	},
+
 	AttackRange = 180,
-	-- Остановка у линии обороны
 	StopRange = 55,
 }
 

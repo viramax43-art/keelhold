@@ -92,9 +92,14 @@ function UIController.CreateButton(text: string, size: UDim2, callback): TextBut
 	return btn
 end
 
-function UIController.UpdateHUD(profile)
+local lastHUDUpdate = 0
+local pendingProfile = nil
+local flushScheduled = false
+local HUD_UPDATE_INTERVAL = 0.25
+
+local function applyHUD(p)
 	local gui = UIController.ScreenGui
-	if not gui or not profile then
+	if not gui or not p then
 		return
 	end
 	local hud = gui:FindFirstChild("HUD")
@@ -104,11 +109,39 @@ function UIController.UpdateHUD(profile)
 	local gold = hud:FindFirstChild("Gold")
 	local xp = hud:FindFirstChild("XP")
 	if gold then
-		gold.Text = "Gold: " .. tostring(profile.Gold or 0)
+		gold.Text = "Gold: " .. tostring(p.Gold or 0)
 	end
 	if xp then
-		xp.Text = string.format("XP: %d | Lv %d", profile.XP or 0, profile.Level or 1)
+		xp.Text = string.format("XP: %d | Lv %d", p.XP or 0, p.Level or 1)
 	end
+end
+
+function UIController.UpdateHUD(profile)
+	if not profile then
+		return
+	end
+	pendingProfile = profile
+	local now = os.clock()
+	if now - lastHUDUpdate >= HUD_UPDATE_INTERVAL then
+		lastHUDUpdate = now
+		local p = pendingProfile
+		pendingProfile = nil
+		applyHUD(p)
+		return
+	end
+	if flushScheduled then
+		return
+	end
+	flushScheduled = true
+	task.delay(HUD_UPDATE_INTERVAL, function()
+		flushScheduled = false
+		if pendingProfile then
+			lastHUDUpdate = os.clock()
+			local p = pendingProfile
+			pendingProfile = nil
+			applyHUD(p)
+		end
+	end)
 end
 
 return UIController

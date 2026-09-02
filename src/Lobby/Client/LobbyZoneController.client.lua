@@ -12,14 +12,15 @@ local ClientLog = require(ReplicatedStorage.Shared.Util.ClientLog)
 
 ClientLoader.EnsureReady()
 
+-- ZoneType attribute → MenuController tab id (UI titles stay in MenuController)
 local ZONE_TABS = {
-	Shop = "Магазин",
-	ArmorShop = "Броня",
-	UnitShop = "Юниты",
-	Upgrade = "Прокачка",
-	DailyReward = "Награды",
-	Promocode = "Промокод",
-	Leaderboard = "Лидерборд",
+	Shop = "Shop",
+	ArmorShop = "Armor",
+	UnitShop = "Units",
+	Upgrade = "Upgrade",
+	DailyReward = "Daily",
+	Promocode = "Promo",
+	Leaderboard = "Leaderboard",
 }
 
 local lastBattle = 0

@@ -101,7 +101,8 @@ function BotService.DamageBot(bot, amount: number)
 	if not bot or not bot.Alive then
 		return
 	end
-	local mitigated = math.max(1, amount - (bot.Armor or 0) * 0.25)
+	local DamageFormula = require(ReplicatedStorage.Shared.Util.DamageFormula)
+	local mitigated = DamageFormula.Mitigate(amount, bot.Armor)
 	bot.CurrentHP = math.max(0, (bot.CurrentHP or 0) - mitigated)
 	CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, bot.MaxHP)
 	local hum = bot.Model and bot.Model:FindFirstChildOfClass("Humanoid")
@@ -134,44 +135,41 @@ function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })
 		squad.Parent = workspace
 	end
 
-	local bots = {}
+	local spawnedBots = {}
 	for slotIndex = 1, botCount do
 		local pos = defensePositions[slotIndex] or defensePositions[1] or Vector3.new(0, 5, 0)
 		local stats = StatCalculator.BuildCombatStats(profile, slotIndex)
 
+		local model = nil
+		local skin = "kit"
 		if slotIndex == 1 then
-			task.spawn(function()
-				local facing = BotService.GetDefenseCFrame(pos)
-				local clone = AvatarClone.Create(hostPlayer, slotIndex, facing, stats)
-				local model = clone
-				if not model then
-					Log.Write("Bot", "Avatar clone failed for slot 1, using kit fallback", "WARN")
-					model = createKit(slotIndex, pos, stats, profile)
-				end
-				if model then
-					local bot = buildRecord(model, slotIndex, stats, hostPlayer)
-					BotService.StartBotAI(bot)
-					if WaveService and WaveService.RegisterBot then
-						WaveService.RegisterBot(bot)
-					end
-					Log.Write("Bot", string.format("Bot slot %d weapon=%s skin=%s", slotIndex, stats.WeaponType, clone and "avatar" or "kit"))
-				end
-			end)
-		else
-			local model = createKit(slotIndex, pos, stats, profile)
-			if model then
-				local bot = buildRecord(model, slotIndex, stats, hostPlayer)
-				table.insert(bots, bot)
-				BotService.StartBotAI(bot)
-				if WaveService and WaveService.RegisterBot then
-					WaveService.RegisterBot(bot)
-				end
-				Log.Write("Bot", string.format("Bot slot %d at %s weapon=%s skin=kit", slotIndex, tostring(pos), stats.WeaponType))
+			local facing = BotService.GetDefenseCFrame(pos)
+			local clone = AvatarClone.Create(hostPlayer, slotIndex, facing, stats)
+			if clone then
+				model = clone
+				skin = "avatar"
+			else
+				Log.Write("Bot", "Avatar clone failed for slot 1, using kit fallback", "WARN")
+				model = createKit(slotIndex, pos, stats, profile)
 			end
+		else
+			model = createKit(slotIndex, pos, stats, profile)
+		end
+
+		if model then
+			local bot = buildRecord(model, slotIndex, stats, hostPlayer)
+			table.insert(spawnedBots, bot)
+			BotService.StartBotAI(bot)
+			if WaveService and WaveService.RegisterBot then
+				WaveService.RegisterBot(bot)
+			else
+				Log.Write("Bot", "WaveService not ready for slot " .. slotIndex, "WARN")
+			end
+			Log.Write("Bot", string.format("Bot slot %d weapon=%s skin=%s", slotIndex, stats.WeaponType, skin))
 		end
 	end
-	Log.Write("Bot", "Spawned " .. botCount .. " defense bots")
-	return bots
+	Log.Write("Bot", "Spawned " .. #spawnedBots .. "/" .. botCount .. " defense bots")
+	return spawnedBots
 end
 
 function BotService:Init(services)

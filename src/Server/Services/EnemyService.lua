@@ -9,12 +9,17 @@ local CharacterRigBuilder = require(ReplicatedStorage.Shared.Builders.CharacterR
 local WaveScaling = require(ReplicatedStorage.Shared.Util.WaveScaling)
 local AccuracyHelper = require(ReplicatedStorage.Shared.Util.AccuracyHelper)
 local CombatVFX = require(ReplicatedStorage.Shared.Util.CombatVFX)
+local DamageFormula = require(ReplicatedStorage.Shared.Util.DamageFormula)
 local Log = require(ReplicatedStorage.Shared.Util.Log)
 
 local EnemyService = {}
 local enemies = {}
 local WaveService, BotService, RewardService
 local nextId = 1
+local cachedBotPositions = {}
+local lastCacheUpdate = 0
+local CACHE_INTERVAL = 0.3
+local cleanupStarted = false
 
 local function getWaypoints(): { Vector3 }
 	local folder = workspace:FindFirstChild("MapPoints")
@@ -42,13 +47,27 @@ local function getEnemySpawn(): Vector3
 	return Vector3.new(0, 5, 0)
 end
 
+function EnemyService.FindEnemyById(id: string)
+	if not id then
+		return nil
+	end
+	for _, e in ipairs(enemies) do
+		if e.Id == id and e.Alive then
+			return e
+		end
+	end
+	return nil
+end
+
 function EnemyService.FindNearestEnemy(fromPos: Vector3, maxRange: number)
-	local best, bestDist = nil, maxRange or 300
+	local maxRangeSq = (maxRange or 300) ^ 2
+	local best, bestDistSq = nil, maxRangeSq
 	for _, e in ipairs(enemies) do
 		if e.Alive and e.Root then
-			local d = (e.Root.Position - fromPos).Magnitude
-			if d < bestDist then
-				bestDist = d
+			local diff = e.Root.Position - fromPos
+			local dSq = diff.X * diff.X + diff.Y * diff.Y + diff.Z * diff.Z
+			if dSq < bestDistSq then
+				bestDistSq = dSq
 				best = e
 			end
 		end
@@ -75,13 +94,34 @@ function EnemyService.Clear()
 	table.clear(enemies)
 end
 
+function EnemyService.UpdateBotPositionCache()
+	local now = os.clock()
+	if now - lastCacheUpdate < CACHE_INTERVAL then
+		return cachedBotPositions
+	end
+	lastCacheUpdate = now
+	cachedBotPositions = {}
+	local bots = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+	for _, b in ipairs(bots) do
+		if b.Alive and b.Root then
+			table.insert(cachedBotPositions, {
+				Position = b.Root.Position,
+				Record = b,
+			})
+		end
+	end
+	return cachedBotPositions
+end
+
 function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
 	if not enemy or not enemy.Alive then
 		return
 	end
-	local mitigated = math.max(1, amount - (enemy.Armor or 0) * 0.2)
+	local mitigated = DamageFormula.Mitigate(amount, enemy.Armor)
 	enemy.CurrentHP -= mitigated
-	CharacterRigBuilder.UpdateHealthBar(enemy.Model, enemy.CurrentHP, enemy.MaxHP)
+	if enemy.Model then
+		CharacterRigBuilder.UpdateHealthBar(enemy.Model, enemy.CurrentHP, enemy.MaxHP)
+	end
 	if enemy.Root then
 		CombatVFX.PlayBlood(enemy.Root.Position + Vector3.new(0, 1, 0), 2.5)
 	end
@@ -93,24 +133,43 @@ function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
 		if enemy.Model then
 			enemy.Model:Destroy()
 		end
+		enemy.Model = nil
+		enemy.Root = nil
 		if WaveService and WaveService.OnEnemyDied then
 			WaveService.OnEnemyDied()
 		end
 	end
 end
 
+function EnemyService.StartCleanupLoop()
+	if cleanupStarted then
+		return
+	end
+	cleanupStarted = true
+	task.spawn(function()
+		while true do
+			task.wait(10)
+			for i = #enemies, 1, -1 do
+				if not enemies[i].Alive then
+					table.remove(enemies, i)
+				end
+			end
+		end
+	end)
+end
+
 local function startAI(enemy)
 	task.spawn(function()
 		local waypoints = enemy.Waypoints
 		local wpIndex = 1
+		local tickDt = 0.15
 		while enemy.Alive and enemy.Model and enemy.Model.Parent do
-			task.wait(0.1)
+			task.wait(tickDt)
 			local root = enemy.Root
 			if not root then
 				break
 			end
 
-			-- Move toward waypoint
 			if wpIndex <= #waypoints then
 				local target = waypoints[wpIndex]
 				local pos = root.Position
@@ -121,33 +180,33 @@ local function startAI(enemy)
 					wpIndex += 1
 				elseif not nearDefense then
 					local dir = flat.Unit
-					local speed = enemy.WalkSpeed or 14
-					local nextPos = pos + dir * speed * 0.1
-					root.CFrame = CFrame.lookAt(Vector3.new(nextPos.X, pos.Y, nextPos.Z), Vector3.new(nextPos.X, pos.Y, nextPos.Z) + dir)
+					local speed = enemy.WalkSpeed or 12
+					local nextPos = pos + dir * speed * tickDt
+					root.CFrame = CFrame.lookAt(
+						Vector3.new(nextPos.X, pos.Y, nextPos.Z),
+						Vector3.new(nextPos.X, pos.Y, nextPos.Z) + dir
+					)
 				end
 			end
 
-			-- Shoot nearest bot
 			local now = os.clock()
 			if now - (enemy.LastFire or 0) >= (enemy.FireRate or 0.5) and BotService then
-				local bots = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+				local cached = EnemyService.UpdateBotPositionCache()
 				local best, bestD = nil, EnemiesConfig.AttackRange or 180
-				for _, b in ipairs(bots) do
-					if b.Alive and b.Root then
-						local d = (b.Root.Position - root.Position).Magnitude
-						if d < bestD then
-							bestD = d
-							best = b
-						end
+				for _, entry in ipairs(cached) do
+					local d = (entry.Position - root.Position).Magnitude
+					if d < bestD then
+						bestD = d
+						best = entry.Record
 					end
 				end
-				if best then
+				if best and best.Root then
 					enemy.LastFire = now
 					local origin = root.Position + Vector3.new(0, 1.5, 0)
 					local aim = best.Root.Position + Vector3.new(0, 1, 0)
 					CombatVFX.PlayMuzzle(origin, aim)
 					if AccuracyHelper.RollHit(enemy.Accuracy) then
-						BotService.DamageBot(best, enemy.Damage or 10)
+						BotService.DamageBot(best, enemy.Damage or 8)
 					end
 				end
 			end
@@ -168,8 +227,9 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 	end
 
 	Log.Write("Wave", string.format("Wave %d starting, enemies=%d", wave, count))
-	local interval = (GameConfig.Battle and GameConfig.Battle.EnemySpawnInterval) or 0.35
+	local interval = (GameConfig.Battle and GameConfig.Battle.EnemySpawnInterval) or 0.6
 	local weapons = EnemiesConfig.WeaponRotation or { "Pistol" }
+	local types = EnemiesConfig.EnemyTypes or {}
 
 	task.spawn(function()
 		for i = 1, count do
@@ -177,28 +237,34 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 				break
 			end
 			local weaponType = weapons[((i - 1) % #weapons) + 1]
+			local typeMod = types[weaponType] or {}
+			local finalHP = stats.HP * (typeMod.HPMult or 1)
+			local finalDMG = stats.Damage * (typeMod.DamageMult or 1)
+			local finalSpeed = stats.WalkSpeed * (typeMod.SpeedMult or 1)
+			local finalAcc = math.clamp(stats.Accuracy + (typeMod.AccuracyMod or 0), 0.2, 0.95)
 			local offset = Vector3.new((i % 5 - 2) * 2.5, 0, 0)
 			local model = CharacterRigBuilder.CreateR6Kit({
 				ModelName = "Enemy_" .. nextId,
 				DisplayName = "Враг",
 				Position = spawnPos + offset,
 				WeaponType = weaponType,
-				MaxHP = stats.HP,
-				CurrentHP = stats.HP,
+				MaxHP = finalHP,
+				CurrentHP = finalHP,
 				Parent = folder,
 				Kit = CharacterRigBuilder.GetKitVariant(i + 3),
 			})
+			model:SetAttribute("EnemyId", "E" .. nextId)
 			local enemy = {
 				Id = "E" .. nextId,
 				Model = model,
 				Root = model.PrimaryPart,
-				CurrentHP = stats.HP,
-				MaxHP = stats.HP,
+				CurrentHP = finalHP,
+				MaxHP = finalHP,
 				Armor = stats.Armor,
-				Damage = stats.Damage,
+				Damage = finalDMG,
 				FireRate = stats.FireRate,
-				Accuracy = stats.Accuracy,
-				WalkSpeed = stats.WalkSpeed,
+				Accuracy = finalAcc,
+				WalkSpeed = finalSpeed,
 				Waypoints = waypoints,
 				LastFire = 0,
 				Alive = true,
@@ -216,6 +282,7 @@ function EnemyService:Init(services)
 	WaveService = services.WaveService
 	BotService = services.BotService
 	RewardService = services.RewardService
+	EnemyService.StartCleanupLoop()
 end
 
 return EnemyService
