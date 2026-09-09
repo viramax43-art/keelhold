@@ -1,10 +1,15 @@
 --[[
-	EnemyService — спавн и AI врагов по BridgePath.
+	EnemyService — спавн и AI врагов.
+	Движение: один общий Heartbeat (без per-enemy task.wait).
+	Оружие: индивидуальные Range/Accuracy/Spread из WeaponsConfig.
+	Очередь: attack slots + queue slots по полосам.
 ]]
 
+local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local EnemiesConfig = require(ReplicatedStorage.Shared.Config.EnemiesConfig)
+local WeaponsConfig = require(ReplicatedStorage.Shared.Config.WeaponsConfig)
 local CharacterRigBuilder = require(ReplicatedStorage.Shared.Builders.CharacterRigBuilder)
 local WaveScaling = require(ReplicatedStorage.Shared.Util.WaveScaling)
 local AccuracyHelper = require(ReplicatedStorage.Shared.Util.AccuracyHelper)
@@ -16,19 +21,74 @@ local EnemyService = {}
 local enemies = {}
 local WaveService, BotService, RewardService
 local nextId = 1
-local remainingToSpawn = 0 -- ещё не появившиеся в текущей волне (для HUD)
+local remainingToSpawn = 0
 local spawnGeneration = 0
 local cachedBotPositions = {}
 local lastCacheUpdate = 0
 local CACHE_INTERVAL = 0.3
 local cleanupStarted = false
 local attackSlotCount = 0
+local laneAttackCounts = {} -- [lane] = number
+local aiConnection: RBXScriptConnection? = nil
+local TURN_SPEED = 12
+
+local function getWeaponStats(weaponType: string, wave: number)
+	local maxTier = WeaponsConfig.MaxTier or 5
+	local tier = math.clamp(1 + math.floor(math.max(0, wave - 1) / 4), 1, maxTier)
+	local byType = WeaponsConfig.Weapons and WeaponsConfig.Weapons[weaponType]
+	local cfg = byType and (byType[tier] or byType[1])
+	if type(cfg) ~= "table" then
+		return {
+			Damage = EnemiesConfig.BaseStats.Damage,
+			FireRate = EnemiesConfig.BaseStats.FireRate,
+			Range = EnemiesConfig.AttackRange or 180,
+			Accuracy = EnemiesConfig.BaseStats.Accuracy,
+			Spread = 0.28,
+			Tier = tier,
+		}
+	end
+	return {
+		Damage = tonumber(cfg.Damage) or EnemiesConfig.BaseStats.Damage,
+		FireRate = tonumber(cfg.FireRate) or EnemiesConfig.BaseStats.FireRate,
+		Range = tonumber(cfg.Range) or (EnemiesConfig.AttackRange or 180),
+		Accuracy = tonumber(cfg.Accuracy) or EnemiesConfig.BaseStats.Accuracy,
+		Spread = tonumber(cfg.Spread) or 0.28,
+		Tier = tier,
+	}
+end
+
+local function distToDefense(enemy): number
+	local wps = enemy.Waypoints
+	if not wps or #wps == 0 or not enemy.Root then
+		return math.huge
+	end
+	local last = wps[#wps]
+	local pos = enemy.Root.Position
+	return Vector3.new(last.X - pos.X, 0, last.Z - pos.Z).Magnitude
+end
+
+local function getDefenseFrame(enemy): (Vector3?, Vector3?)
+	local wps = enemy.Waypoints
+	if not wps or #wps == 0 then
+		return nil, nil
+	end
+	local last = wps[#wps]
+	local first = wps[1]
+	local dir = Vector3.new(last.X - first.X, 0, last.Z - first.Z)
+	if dir.Magnitude < 0.1 then
+		dir = Vector3.new(0, 0, -1)
+	else
+		dir = dir.Unit
+	end
+	return last, dir
+end
 
 local function nearestAllyAhead(enemy): any?
 	if not enemy.Root then
 		return nil
 	end
-	local best, bestDist = nil, EnemiesConfig.MinSpacing or 5.5
+	local minSpacing = EnemiesConfig.MinSpacing or 5.5
+	local best, bestDist = nil, minSpacing
 	local myProg = enemy.ProgressDist or math.huge
 	for _, other in ipairs(enemies) do
 		if other.Alive and other ~= enemy and other.Lane == enemy.Lane and other.Root then
@@ -47,34 +107,102 @@ end
 
 local function tryClaimAttackSlot(enemy): boolean
 	local maxA = EnemiesConfig.MaxAttackers or 4
+	local maxPerLane = EnemiesConfig.AttackSlotsPerLane or 1
 	if enemy.HasAttackSlot then
 		return true
 	end
-	if attackSlotCount >= maxA then
+	local lane = enemy.Lane or 1
+	local laneCount = laneAttackCounts[lane] or 0
+	if attackSlotCount >= maxA or laneCount >= maxPerLane then
 		return false
 	end
 	enemy.HasAttackSlot = true
+	enemy.AttackSlotIndex = laneCount + 1
 	attackSlotCount += 1
+	laneAttackCounts[lane] = laneCount + 1
 	return true
 end
 
 local function releaseAttackSlot(enemy)
 	if enemy.HasAttackSlot then
 		enemy.HasAttackSlot = false
+		enemy.AttackSlotIndex = nil
+		local lane = enemy.Lane or 1
+		laneAttackCounts[lane] = math.max(0, (laneAttackCounts[lane] or 1) - 1)
 		attackSlotCount = math.max(0, attackSlotCount - 1)
 	end
 end
 
-local function distToDefense(enemy): number
-	local wps = enemy.Waypoints
-	if not wps or #wps == 0 or not enemy.Root then
-		return math.huge
+local function computeQueueIndex(enemy): number
+	local idx = 0
+	local myProg = enemy.ProgressDist or math.huge
+	for _, other in ipairs(enemies) do
+		if other.Alive and other ~= enemy and other.Lane == enemy.Lane then
+			local otherProg = other.ProgressDist or math.huge
+			if other.HasAttackSlot or otherProg < myProg - 0.05 then
+				idx += 1
+			elseif math.abs(otherProg - myProg) < 0.5 and (other.Id or "") < (enemy.Id or "") then
+				idx += 1
+			end
+		end
 	end
-	local last = wps[#wps]
-	local pos = enemy.Root.Position
-	return Vector3.new(last.X - pos.X, 0, last.Z - pos.Z).Magnitude
+	return idx
 end
 
+local function setAttackTargetPosition(enemy)
+	local last, dir = getDefenseFrame(enemy)
+	if not last or not dir or not enemy.Root then
+		return
+	end
+	local spacing = EnemiesConfig.AttackSpacing or 4.5
+	local slot = enemy.AttackSlotIndex or 1
+	local lateralNudge = (slot - 1) * 0.35
+	local pos = last - dir * spacing
+	-- Слегка разводим слоты вбок вдоль перпендикуляра
+	local side = Vector3.new(-dir.Z, 0, dir.X)
+	if side.Magnitude > 0.1 then
+		pos = pos + side.Unit * lateralNudge
+	end
+	enemy.AttackTargetPosition = Vector3.new(pos.X, enemy.Root.Position.Y, pos.Z)
+end
+
+local function setQueueTargetPosition(enemy)
+	local last, dir = getDefenseFrame(enemy)
+	if not last or not dir or not enemy.Root then
+		return
+	end
+	local q = enemy.QueueSlotIndex or 0
+	local spacing = EnemiesConfig.QueueSpacing or 5.5
+	local pos = last - dir * (spacing * (q + 1) + (EnemiesConfig.AttackSpacing or 4.5))
+	enemy.QueueTargetPosition = Vector3.new(pos.X, enemy.Root.Position.Y, pos.Z)
+end
+
+local function moveRootToward(root: BasePart, targetPos: Vector3, lookDir: Vector3?, speed: number, dt: number)
+	local pos = root.Position
+	local flat = Vector3.new(targetPos.X - pos.X, 0, targetPos.Z - pos.Z)
+	if flat.Magnitude < 0.08 then
+		return true
+	end
+	local dir = flat.Unit
+	local step = math.min(flat.Magnitude, speed * dt)
+	local nextPos = Vector3.new(pos.X + dir.X * step, pos.Y, pos.Z + dir.Z * step)
+	local face = lookDir or dir
+	if face.Magnitude < 0.05 then
+		face = dir
+	else
+		face = Vector3.new(face.X, 0, face.Z)
+		if face.Magnitude < 0.05 then
+			face = dir
+		else
+			face = face.Unit
+		end
+	end
+	local targetRot = CFrame.lookAt(nextPos, nextPos + face)
+	local alpha = math.clamp(dt * TURN_SPEED, 0, 1)
+	local newRot = root.CFrame.Rotation:Lerp(targetRot.Rotation, alpha)
+	root.CFrame = CFrame.new(nextPos) * newRot
+	return flat.Magnitude <= step + 0.05
+end
 
 local function getWaypoints(): { Vector3 }
 	local folder = workspace:FindFirstChild("MapPoints")
@@ -149,12 +277,6 @@ function EnemyService.PickRandomEnemy(fromPos: Vector3, maxRange: number, prefer
 	return EnemyService.PickTargetForDefender(fromPos, maxRange, preferred, nil)
 end
 
---[[
-	Цель для союзного бота:
-	- предпочитаем ближайших врагов (не весь мост случайно);
-	- не сваливаем всех ботов в одного «самого ближнего»;
-	- мягкий lock, но с лимитом фокуса (~1–2 бота на цель).
-]]
 function EnemyService.PickTargetForDefender(fromPos: Vector3, maxRange: number, preferred, teammateBots, selfBot): any?
 	local list = EnemyService.GetAliveInRange(fromPos, maxRange)
 	if #list == 0 then
@@ -203,7 +325,6 @@ function EnemyService.PickTargetForDefender(fromPos: Vector3, maxRange: number, 
 		return false
 	end
 
-	-- Мягкий lock: держим цель, если она ещё «ближняя» и не перегружена чужим фокусом
 	if preferred and preferred.Alive and preferred.Root and inPool(preferred) then
 		local f = focus[preferred.Id] or 0
 		if f < 2 and math.random() < 0.62 then
@@ -251,15 +372,23 @@ function EnemyService.GetAliveCount(): number
 	return n
 end
 
--- Живые + ещё не заспавненные (чтобы HUD не показывал «1» в начале волны)
 function EnemyService.GetDisplayEnemyCount(): number
 	return EnemyService.GetAliveCount() + math.max(0, remainingToSpawn)
+end
+
+local function stopAIUpdate()
+	if aiConnection then
+		aiConnection:Disconnect()
+		aiConnection = nil
+	end
 end
 
 function EnemyService.Clear()
 	spawnGeneration += 1
 	remainingToSpawn = 0
 	attackSlotCount = 0
+	table.clear(laneAttackCounts)
+	stopAIUpdate()
 	for _, e in ipairs(enemies) do
 		e.Alive = false
 		e.HasAttackSlot = false
@@ -314,6 +443,7 @@ function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
 	end
 	if enemy.CurrentHP <= 0 then
 		enemy.Alive = false
+		enemy.State = "Dead"
 		releaseAttackSlot(enemy)
 		if RewardService and attacker then
 			RewardService.OnEnemyKilled(attacker)
@@ -347,122 +477,182 @@ function EnemyService.StartCleanupLoop()
 	end)
 end
 
-local function startAI(enemy)
-	task.spawn(function()
-		local waypoints = enemy.Waypoints
-		local wpIndex = 1
-		local lastClock = os.clock()
-		enemy.State = "Moving"
-		while enemy.Alive and enemy.Model and enemy.Model.Parent do
-			task.wait()
-			local now = os.clock()
-			local dt = math.clamp(now - lastClock, 0, 0.05)
-			lastClock = now
-			local root = enemy.Root
-			if not root or not root.Parent then
-				break
-			end
+local function tryFire(enemy, now: number, speedMult: number)
+	local root = enemy.Root
+	if not root or not BotService then
+		return
+	end
 
-			local speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
-			enemy.ProgressDist = distToDefense(enemy)
-			local meleeRange = EnemiesConfig.MeleeRange or 18
-			local nearLine = enemy.ProgressDist <= meleeRange
+	local arrive = EnemiesConfig.AttackArriveDistance or 1.5
+	local isAtAttackPosition = enemy.HasAttackSlot
+		and enemy.AttackTargetPosition
+		and (root.Position - enemy.AttackTargetPosition).Magnitude <= arrive
 
-			if nearLine then
-				if tryClaimAttackSlot(enemy) then
-					enemy.State = "Attacking"
-				else
-					enemy.State = "Queued"
-				end
+	local useMelee = enemy.State == "Attacking" and isAtAttackPosition == true
+	local fireCd = enemy.FireRate or 0.5
+	local dmg = enemy.Damage or 8
+	if useMelee then
+		fireCd = EnemiesConfig.MeleeFireRate or 0.45
+		dmg = dmg * (EnemiesConfig.MeleeDamageMult or 2.2)
+	end
+	fireCd = fireCd / math.max(1, speedMult)
+
+	-- Queued не стреляет; Moving/Attacking — да
+	if enemy.State == "Queued" then
+		return
+	end
+	if now - (enemy.LastFire or 0) < fireCd then
+		return
+	end
+
+	local weaponRange = enemy.Range or EnemiesConfig.AttackRange or 180
+	local cached = EnemyService.UpdateBotPositionCache()
+	local best, bestD = nil, if useMelee then (arrive + 8) else weaponRange
+	for _, entry in ipairs(cached) do
+		local d = (entry.Position - root.Position).Magnitude
+		if d < bestD then
+			bestD = d
+			best = entry.Record
+		end
+	end
+	if not best or not best.Root then
+		return
+	end
+
+	enemy.LastFire = now
+	local origin = CombatVFX.GetMuzzleWorldPosition(enemy.Model) or (root.Position + Vector3.new(0, 1.2, 0))
+	local aim = best.Root.Position + Vector3.new(0, 1, 0)
+	CharacterRigBuilder.PlayFireAnimation(enemy.Model, aim)
+
+	local losClear, losPos = CombatVFX.HasClearLos(origin, aim, weaponRange, enemy.Model, best.Model)
+
+	local hit = false
+	if useMelee then
+		hit = true
+	elseif not losClear then
+		hit = false
+		aim = losPos
+	else
+		-- bestD уже ≤ weaponRange; clamp от смещения дула
+		local shotDistance = math.min(bestD, weaponRange)
+		hit = AccuracyHelper.RollShot({
+			baseAccuracy = enemy.Accuracy,
+			distance = shotDistance,
+			maxRange = weaponRange,
+			spread = enemy.Spread or 0.28,
+			movingShooter = enemy.State == "Moving",
+			movingTarget = false,
+			entityMod = 0,
+		})
+	end
+
+	if hit then
+		CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
+		BotService.DamageBot(best, dmg)
+	else
+		CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType, weaponRange)
+	end
+end
+
+local function updateEnemy(enemy, dt: number)
+	local root = enemy.Root
+	if not root or not root.Parent or not enemy.Alive then
+		return
+	end
+
+	local now = os.clock()
+	local speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
+	local speed = (enemy.WalkSpeed or 12) * math.max(1, speedMult)
+	enemy.ProgressDist = distToDefense(enemy)
+
+	local meleeRange = EnemiesConfig.MeleeRange or 18
+	local nearLine = enemy.ProgressDist <= meleeRange
+	local arrive = EnemiesConfig.AttackArriveDistance or 1.5
+
+	if nearLine then
+		if tryClaimAttackSlot(enemy) then
+			setAttackTargetPosition(enemy)
+			local slotPos = enemy.AttackTargetPosition
+			if slotPos and (root.Position - slotPos).Magnitude <= arrive then
+				enemy.State = "Attacking"
 			else
-				if enemy.HasAttackSlot then
-					releaseAttackSlot(enemy)
-				end
 				enemy.State = "Moving"
-			end
-
-			-- Движение к waypoint с deltaTime; стоп если впереди союзник на полосе
-			if enemy.State == "Moving" and wpIndex <= #waypoints then
-				local blocked = nearestAllyAhead(enemy)
-				if not blocked then
-					local target = waypoints[wpIndex]
-					local pos = root.Position
-					local flat = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z)
-					if flat.Magnitude < 3 then
-						wpIndex += 1
-					elseif flat.Magnitude > 0.05 then
-						local dir = flat.Unit
-						local speed = (enemy.WalkSpeed or 12) * math.max(1, speedMult)
-						local step = math.min(flat.Magnitude, speed * dt)
-						local nextPos = pos + dir * step
-						root.CFrame = CFrame.lookAt(
-							Vector3.new(nextPos.X, pos.Y, nextPos.Z),
-							Vector3.new(nextPos.X, pos.Y, nextPos.Z) + dir
-						)
-					end
-				end
-			elseif enemy.State == "Queued" then
-				-- Стоим в очереди — лёгкий поворот к обороне
-				local wps = waypoints
-				if wps and #wps > 0 then
-					local last = wps[#wps]
-					local pos = root.Position
-					local look = Vector3.new(last.X - pos.X, 0, last.Z - pos.Z)
-					if look.Magnitude > 0.1 then
-						root.CFrame = CFrame.lookAt(pos, pos + look.Unit)
-					end
+				if slotPos then
+					local _, dir = getDefenseFrame(enemy)
+					moveRootToward(root, slotPos, dir, speed, dt)
 				end
 			end
-
-			-- Стрельба / ближняя атака
-			local fireCd = enemy.FireRate or 0.5
-			local dmg = enemy.Damage or 8
-			local useMelee = enemy.State == "Attacking"
-			if useMelee then
-				fireCd = EnemiesConfig.MeleeFireRate or 0.45
-				dmg = dmg * (EnemiesConfig.MeleeDamageMult or 2.2)
+		else
+			if enemy.HasAttackSlot then
+				releaseAttackSlot(enemy)
 			end
-			fireCd = fireCd / math.max(1, speedMult)
-
-			if (enemy.State == "Attacking" or enemy.State == "Moving") and now - (enemy.LastFire or 0) >= fireCd and BotService then
-				local cached = EnemyService.UpdateBotPositionCache()
-				local best, bestD = nil, useMelee and (meleeRange + 8) or (EnemiesConfig.AttackRange or 180)
-				for _, entry in ipairs(cached) do
-					local d = (entry.Position - root.Position).Magnitude
-					if d < bestD then
-						bestD = d
-						best = entry.Record
-					end
-				end
-				if best and best.Root then
-					enemy.LastFire = now
-					local origin = CombatVFX.GetMuzzleWorldPosition(enemy.Model) or (root.Position + Vector3.new(0, 1.2, 0))
-					local aim = best.Root.Position + Vector3.new(0, 1, 0)
-					CharacterRigBuilder.PlayFireAnimation(enemy.Model, aim)
-					local hit
-					if useMelee then
-						hit = true -- в упор точность не роллим
-					else
-						hit = AccuracyHelper.RollShot({
-							baseAccuracy = enemy.Accuracy,
-							distance = bestD,
-							maxRange = EnemiesConfig.AttackRange or 180,
-							spread = enemy.Spread or 0.28,
-							movingShooter = enemy.State == "Moving",
-							movingTarget = false,
-							entityMod = 0,
-						})
-					end
-					if hit then
-						CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
-						BotService.DamageBot(best, dmg)
-					else
-						CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType)
+			enemy.State = "Queued"
+			enemy.QueueSlotIndex = computeQueueIndex(enemy)
+			setQueueTargetPosition(enemy)
+			local qPos = enemy.QueueTargetPosition
+			if qPos then
+				local distQ = (root.Position - qPos).Magnitude
+				if distQ > arrive then
+					local _, dir = getDefenseFrame(enemy)
+					moveRootToward(root, qPos, dir, speed, dt)
+				else
+					-- На позиции очереди — смотрим на оборону
+					local last, dir = getDefenseFrame(enemy)
+					if last and dir then
+						local targetRot = CFrame.lookAt(root.Position, root.Position + dir)
+						root.CFrame = CFrame.new(root.Position)
+							* root.CFrame.Rotation:Lerp(targetRot.Rotation, math.clamp(dt * TURN_SPEED, 0, 1))
 					end
 				end
 			end
 		end
-		releaseAttackSlot(enemy)
+	else
+		if enemy.HasAttackSlot then
+			releaseAttackSlot(enemy)
+		end
+		enemy.State = "Moving"
+		enemy.AttackTargetPosition = nil
+		enemy.QueueTargetPosition = nil
+
+		local waypoints = enemy.Waypoints
+		local wpIndex = enemy.WpIndex or 1
+		if waypoints and wpIndex <= #waypoints then
+			local blocked = nearestAllyAhead(enemy)
+			if not blocked then
+				local target = waypoints[wpIndex]
+				local pos = root.Position
+				local flat = Vector3.new(target.X - pos.X, 0, target.Z - pos.Z)
+				if flat.Magnitude < 3 then
+					enemy.WpIndex = wpIndex + 1
+				else
+					moveRootToward(root, target, flat.Unit, speed, dt)
+				end
+			else
+				-- Держим дистанцию — лёгкий стоп
+				local last, dir = getDefenseFrame(enemy)
+				if dir then
+					local targetRot = CFrame.lookAt(root.Position, root.Position + dir)
+					root.CFrame = CFrame.new(root.Position)
+						* root.CFrame.Rotation:Lerp(targetRot.Rotation, math.clamp(dt * TURN_SPEED, 0, 1))
+				end
+			end
+		end
+	end
+
+	tryFire(enemy, now, speedMult)
+end
+
+local function startAIUpdate()
+	if aiConnection then
+		return
+	end
+	aiConnection = RunService.Heartbeat:Connect(function(dt)
+		local effectiveDt = math.clamp(dt, 0, 0.05)
+		for _, enemy in ipairs(enemies) do
+			if enemy.Alive and enemy.Model and enemy.Model.Parent and enemy.Root then
+				updateEnemy(enemy, effectiveDt)
+			end
+		end
 	end)
 end
 
@@ -491,17 +681,26 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 	local halfWidth = math.max(8, (workspace:GetAttribute("CommissionBridgeHalfWidth") or 18))
 	local laneCount = EnemiesConfig.LaneCount or 6
 	local laneWidth = halfWidth * 1.7
+	local baseDmg = EnemiesConfig.BaseStats.Damage or 8
+	local baseFire = EnemiesConfig.BaseStats.FireRate or 0.6
+	local baseAcc = EnemiesConfig.BaseStats.Accuracy or 0.55
+	local waveDmgMult = (stats.Damage or baseDmg) / baseDmg
+	local waveFireMult = baseFire / math.max(0.05, stats.FireRate or baseFire)
+	local waveAccBonus = (stats.Accuracy or baseAcc) - baseAcc
+
 	local function laneLateral(laneIndex: number): number
 		if laneCount <= 1 then
 			return 0
 		end
-		local t = (laneIndex - 1) / (laneCount - 1) -- 0..1
+		local t = (laneIndex - 1) / (laneCount - 1)
 		return (t - 0.5) * laneWidth
 	end
 
 	if WaveService and WaveService.NotifyWaveHud then
 		WaveService.NotifyWaveHud()
 	end
+
+	startAIUpdate()
 
 	task.spawn(function()
 		for i = 1, count do
@@ -517,11 +716,22 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 			end
 			local weaponType = weapons[((i - 1) % #weapons) + 1]
 			local typeMod = types[weaponType] or {}
+			local weaponCfg = getWeaponStats(weaponType, wave)
 			local finalHP = stats.HP * (typeMod.HPMult or 1)
-			local finalDMG = stats.Damage * (typeMod.DamageMult or 1)
+			local finalDMG = weaponCfg.Damage * (typeMod.DamageMult or 1) * waveDmgMult
 			local speedJitter = 0.85 + math.random() * 0.3
 			local finalSpeed = stats.WalkSpeed * (typeMod.SpeedMult or 1) * speedJitter
-			local finalAcc = math.clamp(stats.Accuracy + (typeMod.AccuracyMod or 0), 0.2, 0.95)
+			local finalAcc = math.clamp(
+				weaponCfg.Accuracy + (typeMod.AccuracyMod or 0) + waveAccBonus,
+				0.2,
+				0.95
+			)
+			local finalFire = math.max(
+				EnemiesConfig.MinFireRate or 0.15,
+				weaponCfg.FireRate / math.max(0.5, waveFireMult)
+			)
+			local finalSpread = weaponCfg.Spread
+			local finalRange = weaponCfg.Range
 			local lane = ((i - 1) % laneCount) + 1
 			local lateral = laneLateral(lane)
 			local spawnAt = MapBind.OffsetOnBridge(spawnPos, 0, lateral)
@@ -547,6 +757,7 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 			end
 			model:SetAttribute("EnemyId", "E" .. nextId)
 			model:SetAttribute("Lane", lane)
+			model:SetAttribute("WeaponTier", weaponCfg.Tier)
 			local enemy = {
 				Id = "E" .. nextId,
 				Model = model,
@@ -555,15 +766,23 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 				MaxHP = finalHP,
 				Armor = stats.Armor,
 				Damage = finalDMG,
-				FireRate = stats.FireRate,
+				FireRate = finalFire,
 				Accuracy = finalAcc,
-				Spread = 0.28,
+				Spread = finalSpread,
+				Range = finalRange,
+				WeaponType = weaponType,
 				WalkSpeed = finalSpeed,
 				Waypoints = #personalWp > 0 and personalWp or waypoints,
+				WpIndex = 1,
 				Lane = lane,
+				LateralOffset = lateral,
 				State = "Moving",
 				ProgressDist = math.huge,
 				HasAttackSlot = false,
+				AttackSlotIndex = nil,
+				QueueSlotIndex = nil,
+				AttackTargetPosition = nil,
+				QueueTargetPosition = nil,
 				LastFire = 0,
 				Alive = true,
 			}
@@ -574,16 +793,15 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 			end
 			remainingToSpawn = math.max(0, remainingToSpawn - 1)
 			table.insert(enemies, enemy)
-			startAI(enemy)
 			if WaveService and WaveService.NotifyWaveHud then
 				WaveService.NotifyWaveHud()
 			end
 			if i % groupSize == 0 then
-				local speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
-				task.wait(groupGap / math.max(1, speedMult))
+				local sm = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
+				task.wait(groupGap / math.max(1, sm))
 			else
-				local speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
-				task.wait(interval / math.max(1, speedMult))
+				local sm = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
+				task.wait(interval / math.max(1, sm))
 			end
 		end
 		if generation == spawnGeneration then

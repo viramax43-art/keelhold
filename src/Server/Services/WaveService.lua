@@ -434,10 +434,16 @@ function WaveService.StartBattle(teleportData)
 		end
 	end
 
+	-- Checkpoint только из живого профиля (teleportData может быть устаревшим после Prestige)
 	local startCheckpoint = 0
-	for _, m in ipairs((teleportData and teleportData.Members) or {}) do
-		startCheckpoint = math.max(startCheckpoint, m.LastCheckpoint or 0)
+	for _, p in ipairs(players) do
+		local profile = DataService and DataService.GetProfile(p)
+		if profile then
+			startCheckpoint = math.max(startCheckpoint, tonumber(profile.LastCheckpoint) or 0)
+		end
 	end
+
+	local startWave = math.max(1, startCheckpoint > 0 and startCheckpoint or 1)
 
 	battleState = {
 		Active = true,
@@ -448,7 +454,7 @@ function WaveService.StartBattle(teleportData)
 		SpawningDone = false,
 		Players = players,
 		Bots = {},
-		Wave = math.max(1, startCheckpoint),
+		Wave = startWave,
 		Difficulty = (teleportData and teleportData.Difficulty) or "Normal",
 		CharacterConnections = {},
 	}
@@ -504,7 +510,10 @@ function WaveService.StartBattle(teleportData)
 		difficulty = battleState.Difficulty,
 	})
 
-	Log.Write("Wave", string.format("StartBattle players=%d checkpoint=%d", #players, startCheckpoint))
+	Log.Write(
+		"Wave",
+		string.format("BATTLE_START checkpoint=%d wave=%d players=%d", startCheckpoint, startWave, #players)
+	)
 
 	local host = players[1]
 	BotService.SpawnBots(host, defensePositions())
@@ -517,7 +526,7 @@ function WaveService.StartBattle(teleportData)
 		if RemoteService then
 			RemoteService.FireAll(RemoteNames.BattleStarted, { wave = battleState.Wave })
 		end
-		WaveService.BeginWave(math.max(1, startCheckpoint > 0 and startCheckpoint or 1))
+		WaveService.BeginWave(startWave)
 	end)
 end
 

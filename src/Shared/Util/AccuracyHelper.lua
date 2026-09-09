@@ -31,14 +31,16 @@ end
 function AccuracyHelper.ComputeShotChance(opts: ShotOpts): number
 	local distance = math.max(0, opts.distance or 0)
 	local maxRange = math.max(1, opts.maxRange or 100)
-	if distance > maxRange then
+	-- Небольшой запас: дуло/точка прицеливания чуть длиннее дистанции выбора цели
+	if distance > maxRange * 1.08 then
 		return 0
 	end
+	distance = math.min(distance, maxRange)
 
 	local base = math.clamp(opts.baseAccuracy or 0.75, 0.05, 0.99)
 	local spread = math.clamp(opts.spread or 0.2, 0, 1)
 	local t = distance / maxRange
-	-- Квадратичный штраф: вблизи почти без потерь, вдали сильно зависит от Spread
+	-- Квадратичный штраф: вблизи почти без потерь, вдали сильнее зависит от Spread
 	local distPenalty = (t * t) * (0.18 + spread * 0.55)
 	local movePenalty = 0
 	if opts.movingShooter then
@@ -48,7 +50,7 @@ function AccuracyHelper.ComputeShotChance(opts: ShotOpts): number
 		movePenalty += 0.07
 	end
 	local chance = base - distPenalty - movePenalty + (opts.bonus or 0) + (opts.entityMod or 0)
-	return math.clamp(chance, 0.05, 0.96)
+	return math.clamp(chance, 0.08, 0.96)
 end
 
 function AccuracyHelper.RollShot(opts: ShotOpts): (boolean, number)

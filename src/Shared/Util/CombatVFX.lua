@@ -1,7 +1,6 @@
 --[[
-	CombatVFX — серверные helpers + уведомление клиентов о выстреле бота.
-	Визуал вспышки/трассера/отдачи — на клиенте (BotShootFX / BotWeaponAnimation).
-	Debug-маркер «промах» только при workspace.BD_DebugCombat = true.
+	CombatVFX — серверные helpers + уведомление клиентов о выстреле.
+	Debug-маркер только при BD_DebugCombat; текст — только при BD_DebugCombatText.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -27,6 +26,10 @@ function CombatVFX.ShowDebugMarkers(): boolean
 	return workspace:GetAttribute("BD_DebugCombat") == true
 end
 
+function CombatVFX.ShowDebugText(): boolean
+	return workspace:GetAttribute("BD_DebugCombatText") == true
+end
+
 function CombatVFX.GetMuzzleWorldPosition(model: Model?): Vector3?
 	if not model then
 		return nil
@@ -43,16 +46,103 @@ function CombatVFX.GetMuzzleWorldPosition(model: Model?): Vector3?
 	return nil
 end
 
-local function missEndpoint(origin: Vector3, aim: Vector3): Vector3
-	local dir = aim - origin
-	if dir.Magnitude < 0.1 then
-		dir = Vector3.new(0, 0, -1)
+--[[
+	Конечная точка выстрела / проверка LOS.
+	Попадание в модель цели — это чистый LOS, не препятствие.
+]]
+function CombatVFX.TraceShot(
+	origin: Vector3,
+	aim: Vector3,
+	maxRange: number?,
+	ignoreList: { Instance }?
+): (Vector3, RaycastResult?)
+	local range = math.max(1, tonumber(maxRange) or 180)
+	local direction = aim - origin
+	if direction.Magnitude < 0.05 then
+		direction = Vector3.new(0, 0, -1)
 	end
-	return origin + dir.Unit * math.min(dir.Magnitude * 0.85, 80) + Vector3.new(
-		(math.random() - 0.5) * 4,
-		0.5 + (math.random() - 0.5) * 2,
-		(math.random() - 0.5) * 4
-	)
+	direction = direction.Unit * range
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = ignoreList or {}
+	params.IgnoreWater = true
+
+	local result = workspace:Raycast(origin, direction, params)
+	if result then
+		return result.Position, result
+	end
+	return origin + direction, nil
+end
+
+function CombatVFX.GetShotEndpoint(
+	origin: Vector3,
+	aim: Vector3,
+	maxRange: number?,
+	ignoreList: { Instance }?
+): (Vector3, boolean)
+	local pos, result = CombatVFX.TraceShot(origin, aim, maxRange, ignoreList)
+	return pos, result ~= nil
+end
+
+-- true = можно стрелять (воздух или попали в цель); false = стена/карта
+function CombatVFX.HasClearLos(
+	origin: Vector3,
+	aim: Vector3,
+	maxRange: number?,
+	shooterModel: Model?,
+	targetModel: Model?
+): (boolean, Vector3)
+	local range = math.max(1, tonumber(maxRange) or 180)
+	local direction = aim - origin
+	if direction.Magnitude < 0.05 then
+		direction = Vector3.new(0, 0, -1)
+	end
+	local unit = direction.Unit
+
+	local ignore = {}
+	if shooterModel then
+		table.insert(ignore, shooterModel)
+	end
+	local vfxFolder = workspace:FindFirstChild("CombatVFX")
+	if vfxFolder then
+		table.insert(ignore, vfxFolder)
+	end
+
+	local from = origin
+	local remaining = range
+	-- Несколько шагов: пропускаем пол/рампы (Normal.Y высокий), не считая их стеной
+	for _ = 1, 6 do
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		params.FilterDescendantsInstances = ignore
+		params.IgnoreWater = true
+
+		local result = workspace:Raycast(from, unit * remaining, params)
+		if not result then
+			return true, origin + unit * range
+		end
+
+		if targetModel and result.Instance:IsDescendantOf(targetModel) then
+			return true, result.Position
+		end
+
+		-- Пол / настил моста — не блок LOS
+		if result.Normal.Y > 0.55 then
+			table.insert(ignore, result.Instance)
+			local traveled = (result.Position - from).Magnitude
+			from = result.Position + unit * 0.15
+			remaining = math.max(0, remaining - traveled - 0.15)
+			if remaining < 0.5 then
+				return true, result.Position
+			end
+			continue
+		end
+
+		return false, result.Position
+	end
+
+	return true, origin + unit * range
 end
 
 function CombatVFX.NotifyShot(opts: {
@@ -84,7 +174,6 @@ function CombatVFX.NotifyShot(opts: {
 	end
 end
 
--- Совместимость: сервер больше не спавнит трассёры в Workspace — только remote
 function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3, botModel: Model?, weaponType: string?)
 	if botModel then
 		CombatVFX.NotifyShot({
@@ -96,7 +185,6 @@ function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3, botModel: Model?
 		})
 		return
 	end
-	-- fallback без модели (редко)
 	local folder = ensureFolder()
 	local beam = Instance.new("Part")
 	beam.Anchored = true
@@ -114,8 +202,20 @@ function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3, botModel: Model?
 	end)
 end
 
-function CombatVFX.PlayMiss(origin: Vector3, aim: Vector3, botModel: Model?, weaponType: string?)
-	local missPoint = missEndpoint(origin, aim)
+function CombatVFX.PlayMiss(
+	origin: Vector3,
+	aim: Vector3,
+	botModel: Model?,
+	weaponType: string?,
+	maxRange: number?
+)
+	local ignore = if botModel then { botModel } else {}
+	local vfxFolder = workspace:FindFirstChild("CombatVFX")
+	if vfxFolder then
+		table.insert(ignore, vfxFolder)
+	end
+	local missPoint = CombatVFX.GetShotEndpoint(origin, aim, maxRange or (aim - origin).Magnitude, ignore)
+
 	if botModel then
 		CombatVFX.NotifyShot({
 			Bot = botModel,
@@ -137,23 +237,27 @@ function CombatVFX.PlayMiss(origin: Vector3, aim: Vector3, botModel: Model?, wea
 	spark.CanCollide = false
 	spark.Material = Enum.Material.Neon
 	spark.Color = Color3.fromRGB(220, 230, 255)
-	spark.Size = Vector3.new(0.55, 0.55, 0.55)
+	spark.Size = Vector3.new(0.4, 0.4, 0.4)
 	spark.Position = missPoint
 	spark.Parent = folder
-	local bill = Instance.new("BillboardGui")
-	bill.Size = UDim2.new(0, 70, 0, 22)
-	bill.StudsOffset = Vector3.new(0, 1.2, 0)
-	bill.AlwaysOnTop = true
-	bill.Parent = spark
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
-	label.Text = "промах"
-	label.TextColor3 = Color3.fromRGB(200, 210, 230)
-	label.TextStrokeTransparency = 0.4
-	label.Font = Enum.Font.GothamBold
-	label.TextSize = 14
-	label.Parent = bill
+
+	if CombatVFX.ShowDebugText() then
+		local bill = Instance.new("BillboardGui")
+		bill.Size = UDim2.new(0, 70, 0, 22)
+		bill.StudsOffset = Vector3.new(0, 1.2, 0)
+		bill.AlwaysOnTop = true
+		bill.Parent = spark
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		label.Text = "miss"
+		label.TextColor3 = Color3.fromRGB(200, 210, 230)
+		label.TextStrokeTransparency = 0.4
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 14
+		label.Parent = bill
+	end
+
 	task.delay(0.55, function()
 		if spark.Parent then
 			spark:Destroy()

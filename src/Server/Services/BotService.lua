@@ -115,14 +115,20 @@ function BotService.StartBotAI(bot)
 			bot.LastFire = now
 			local origin = CombatVFX.GetMuzzleWorldPosition(bot.Model) or (bot.Root.Position + Vector3.new(0, 1.2, 0))
 			local distance = (aim - origin).Magnitude
-			local hit = AccuracyHelper.RollShot({
-				baseAccuracy = bot.Accuracy,
-				distance = distance,
-				maxRange = range,
-				spread = bot.Spread or 0.2,
-				movingShooter = false,
-				movingTarget = target.State == "Moving",
-			})
+			-- Цель уже выбрана в пределах range от стойки; не обнуляем шанс из‑за смещения дула
+			local shotDistance = math.min(distance, range)
+			local losClear, losPos = CombatVFX.HasClearLos(origin, aim, range, bot.Model, target.Model)
+			local hit = false
+			if losClear then
+				hit = AccuracyHelper.RollShot({
+					baseAccuracy = bot.Accuracy,
+					distance = shotDistance,
+					maxRange = range,
+					spread = bot.Spread or 0.2,
+					movingShooter = false,
+					movingTarget = target.State == "Moving",
+				})
+			end
 			if hit then
 				CombatVFX.PlayMuzzle(origin, aim, bot.Model, bot.WeaponType)
 				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
@@ -131,7 +137,7 @@ function BotService.StartBotAI(bot)
 				end
 				EnemyService.DamageEnemy(target, damage, bot.HostPlayer)
 			else
-				CombatVFX.PlayMiss(origin, aim, bot.Model, bot.WeaponType)
+				CombatVFX.PlayMiss(origin, if losClear then aim else losPos, bot.Model, bot.WeaponType, range)
 			end
 		end
 	end)

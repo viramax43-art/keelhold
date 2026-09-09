@@ -4,6 +4,7 @@ local StatCalculator = require(ReplicatedStorage.Shared.Util.StatCalculator)
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
 local Util = require(ReplicatedStorage.Shared.Util.Util)
 local ProfileTemplate = require(ReplicatedStorage.Shared.Util.ProfileTemplate)
+local Log = require(ReplicatedStorage.Shared.Util.Log)
 
 local UpgradeService = {}
 
@@ -94,16 +95,24 @@ function UpgradeService:Init(services)
 				return { success = false, error = "Не удалось создать резервную копию профиля" }
 			end
 
+			-- Сначала завершаем бой, чтобы не осталась старая волна/враги
+			local WaveService = services.WaveService
+			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
+				WaveService.EndBattle(false)
+			end
+
 			local before = Util.DeepCopy(profile)
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.PrestigePoints = (profile.PrestigePoints or 0) + UpgradesConfig.Prestige.PointsPerReset
 			profile.LastCheckpoint = 0
-			local WaveService = services.WaveService
-			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
-				task.defer(function()
-					WaveService.EndBattle(false)
-				end)
-			end
+			Log.Write(
+				"Data",
+				string.format(
+					"PRESTIGE_WAVE_RESET userId=%d points=%d checkpoint=0",
+					player.UserId,
+					profile.PrestigePoints
+				)
+			)
 			DataService.MarkDirty(player, "PrestigeReset")
 			DataService.NotifyProfile(player)
 			local ok, err = DataService.FlushProfile(player, "PrestigeReset", false)
@@ -141,17 +150,21 @@ function UpgradeService:Init(services)
 				return { success = false, error = "Не удалось создать резервную копию профиля" }
 			end
 
+			-- То же для Ascend: сначала бой, потом сброс
+			local WaveService = services.WaveService
+			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
+				WaveService.EndBattle(false)
+			end
+
 			local before = Util.DeepCopy(profile)
 			profile.PrestigePoints = 0
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.Ascensions = (profile.Ascensions or 0) + 1
 			profile.LastCheckpoint = 0
-			local WaveService = services.WaveService
-			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
-				task.defer(function()
-					WaveService.EndBattle(false)
-				end)
-			end
+			Log.Write(
+				"Data",
+				string.format("ASCEND_WAVE_RESET userId=%d ascensions=%d checkpoint=0", player.UserId, profile.Ascensions)
+			)
 			DataService.MarkDirty(player, "Ascend")
 			DataService.NotifyProfile(player)
 			local ok, err = DataService.FlushProfile(player, "Ascend", false)

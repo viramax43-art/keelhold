@@ -52,7 +52,7 @@ local EnemiesConfig = {
 	},
 
 	AttackRange = 180,
-	-- Линия атаки у обороны (ближе — чтобы враги реально доходили)
+	-- Линия атаки у обороны
 	StopRange = 16,
 	MeleeRange = 18,
 	MeleeDamageMult = 2.2,
@@ -61,6 +61,10 @@ local EnemiesConfig = {
 	LaneCount = 6,
 	MinSpacing = 5.5,
 	MaxAttackers = 4,
+	AttackSlotsPerLane = 1,
+	QueueSpacing = 5.5,
+	AttackSpacing = 4.5,
+	AttackArriveDistance = 1.5,
 }
 
 return EnemiesConfig
