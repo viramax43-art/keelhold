@@ -63,6 +63,7 @@ function ClientLoader.EnsureReady()
 	end
 
 	safeInit("CombatController")
+	safeInit("BotCombatFXController")
 	safeInit("FlightController")
 	safeInit("ChatController")
 

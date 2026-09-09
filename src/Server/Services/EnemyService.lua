@@ -454,10 +454,10 @@ local function startAI(enemy)
 						})
 					end
 					if hit then
-						CombatVFX.PlayMuzzle(origin, aim)
+						CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
 						BotService.DamageBot(best, dmg)
 					else
-						CombatVFX.PlayMiss(origin, aim)
+						CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType)
 					end
 				end
 			end

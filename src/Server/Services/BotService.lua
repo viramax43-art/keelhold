@@ -124,14 +124,14 @@ function BotService.StartBotAI(bot)
 				movingTarget = target.State == "Moving",
 			})
 			if hit then
-				CombatVFX.PlayMuzzle(origin, aim)
+				CombatVFX.PlayMuzzle(origin, aim, bot.Model, bot.WeaponType)
 				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
 				if math.random() < (bot.CritChance or 0) then
 					damage = damage * math.max(1.5, bot.CritDamage or 1.5)
 				end
 				EnemyService.DamageEnemy(target, damage, bot.HostPlayer)
 			else
-				CombatVFX.PlayMiss(origin, aim)
+				CombatVFX.PlayMiss(origin, aim, bot.Model, bot.WeaponType)
 			end
 		end
 	end)

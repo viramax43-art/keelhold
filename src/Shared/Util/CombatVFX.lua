@@ -1,3 +1,12 @@
+--[[
+	CombatVFX — серверные helpers + уведомление клиентов о выстреле бота.
+	Визуал вспышки/трассера/отдачи — на клиенте (BotShootFX / BotWeaponAnimation).
+	Debug-маркер «промах» только при workspace.BD_DebugCombat = true.
+]]
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
 local CombatVFX = {}
 
 local function ensureFolder(): Folder
@@ -34,16 +43,61 @@ function CombatVFX.GetMuzzleWorldPosition(model: Model?): Vector3?
 	return nil
 end
 
-function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3)
-	local folder = ensureFolder()
-	local attach = Instance.new("Part")
-	attach.Anchored = true
-	attach.CanCollide = false
-	attach.Transparency = 1
-	attach.Size = Vector3.new(0.1, 0.1, 0.1)
-	attach.Position = origin
-	attach.Parent = folder
+local function missEndpoint(origin: Vector3, aim: Vector3): Vector3
+	local dir = aim - origin
+	if dir.Magnitude < 0.1 then
+		dir = Vector3.new(0, 0, -1)
+	end
+	return origin + dir.Unit * math.min(dir.Magnitude * 0.85, 80) + Vector3.new(
+		(math.random() - 0.5) * 4,
+		0.5 + (math.random() - 0.5) * 2,
+		(math.random() - 0.5) * 4
+	)
+end
 
+function CombatVFX.NotifyShot(opts: {
+	Bot: Model,
+	WeaponType: string?,
+	HitPosition: Vector3,
+	Kind: string?,
+	Hit: boolean?,
+})
+	if not RunService:IsServer() then
+		return
+	end
+	local ok, RemoteNames = pcall(function()
+		return require(ReplicatedStorage.Shared.Remotes.RemoteNames)
+	end)
+	if not ok or not RemoteNames then
+		return
+	end
+	local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+	local evt = remotes and remotes:FindFirstChild(RemoteNames.CombatVFX)
+	if evt and evt:IsA("RemoteEvent") then
+		evt:FireAllClients({
+			Kind = opts.Kind or "BotShot",
+			Bot = opts.Bot,
+			WeaponType = opts.WeaponType or opts.Bot:GetAttribute("WeaponType") or "Rifle",
+			HitPosition = opts.HitPosition,
+			Hit = opts.Hit == true,
+		})
+	end
+end
+
+-- Совместимость: сервер больше не спавнит трассёры в Workspace — только remote
+function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3, botModel: Model?, weaponType: string?)
+	if botModel then
+		CombatVFX.NotifyShot({
+			Bot = botModel,
+			WeaponType = weaponType,
+			HitPosition = target,
+			Kind = if botModel:GetAttribute("TeamRole") == "Enemy" then "EnemyShot" else "BotShot",
+			Hit = true,
+		})
+		return
+	end
+	-- fallback без модели (редко)
+	local folder = ensureFolder()
 	local beam = Instance.new("Part")
 	beam.Anchored = true
 	beam.CanCollide = false
@@ -52,73 +106,57 @@ function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3)
 	local dist = math.max(0.1, (target - origin).Magnitude)
 	beam.Size = Vector3.new(0.08, 0.08, dist)
 	beam.CFrame = CFrame.lookAt(origin, target) * CFrame.new(0, 0, -dist / 2)
-	beam.Parent = attach
-	task.delay(0.12, function()
-		if attach and attach.Parent then
-			attach:Destroy()
+	beam.Parent = folder
+	task.delay(0.08, function()
+		if beam.Parent then
+			beam:Destroy()
 		end
 	end)
 end
 
-function CombatVFX.PlayMiss(origin: Vector3, aim: Vector3)
+function CombatVFX.PlayMiss(origin: Vector3, aim: Vector3, botModel: Model?, weaponType: string?)
+	local missPoint = missEndpoint(origin, aim)
+	if botModel then
+		CombatVFX.NotifyShot({
+			Bot = botModel,
+			WeaponType = weaponType,
+			HitPosition = missPoint,
+			Kind = if botModel:GetAttribute("TeamRole") == "Enemy" then "EnemyShot" else "BotShot",
+			Hit = false,
+		})
+	end
+
+	if not CombatVFX.ShowDebugMarkers() then
+		return
+	end
+
 	local folder = ensureFolder()
-	local dir = aim - origin
-	if dir.Magnitude < 0.1 then
-		dir = Vector3.new(0, 0, -1)
-	end
-	local missPoint = origin + dir.Unit * math.min(dir.Magnitude * 0.7, 36) + Vector3.new(
-		(math.random() - 0.5) * 6,
-		1 + (math.random() - 0.5) * 3,
-		(math.random() - 0.5) * 6
-	)
-
-	-- Обычная игра: короткий тусклый трассёр без маркера «промах»
-	local trail = Instance.new("Part")
-	trail.Name = "MissTrail"
-	trail.Anchored = true
-	trail.CanCollide = false
-	trail.Material = Enum.Material.Neon
-	trail.Color = Color3.fromRGB(170, 185, 220)
-	trail.Transparency = 0.45
-	local dist = math.max(0.1, (missPoint - origin).Magnitude)
-	trail.Size = Vector3.new(0.05, 0.05, dist)
-	trail.CFrame = CFrame.lookAt(origin, missPoint) * CFrame.new(0, 0, -dist / 2)
-	trail.Parent = folder
-
-	if CombatVFX.ShowDebugMarkers() then
-		local spark = Instance.new("Part")
-		spark.Name = "MissSpark"
-		spark.Anchored = true
-		spark.CanCollide = false
-		spark.Material = Enum.Material.Neon
-		spark.Color = Color3.fromRGB(220, 230, 255)
-		spark.Size = Vector3.new(0.55, 0.55, 0.55)
-		spark.Position = missPoint
-		spark.Parent = folder
-		local bill = Instance.new("BillboardGui")
-		bill.Size = UDim2.new(0, 70, 0, 22)
-		bill.StudsOffset = Vector3.new(0, 1.2, 0)
-		bill.AlwaysOnTop = true
-		bill.Parent = spark
-		local label = Instance.new("TextLabel")
-		label.Size = UDim2.new(1, 0, 1, 0)
-		label.BackgroundTransparency = 1
-		label.Text = "промах"
-		label.TextColor3 = Color3.fromRGB(200, 210, 230)
-		label.TextStrokeTransparency = 0.4
-		label.Font = Enum.Font.GothamBold
-		label.TextSize = 14
-		label.Parent = bill
-		task.delay(0.55, function()
-			if spark and spark.Parent then
-				spark:Destroy()
-			end
-		end)
-	end
-
-	task.delay(0.1, function()
-		if trail and trail.Parent then
-			trail:Destroy()
+	local spark = Instance.new("Part")
+	spark.Name = "MissSpark"
+	spark.Anchored = true
+	spark.CanCollide = false
+	spark.Material = Enum.Material.Neon
+	spark.Color = Color3.fromRGB(220, 230, 255)
+	spark.Size = Vector3.new(0.55, 0.55, 0.55)
+	spark.Position = missPoint
+	spark.Parent = folder
+	local bill = Instance.new("BillboardGui")
+	bill.Size = UDim2.new(0, 70, 0, 22)
+	bill.StudsOffset = Vector3.new(0, 1.2, 0)
+	bill.AlwaysOnTop = true
+	bill.Parent = spark
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Text = "промах"
+	label.TextColor3 = Color3.fromRGB(200, 210, 230)
+	label.TextStrokeTransparency = 0.4
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 14
+	label.Parent = bill
+	task.delay(0.55, function()
+		if spark.Parent then
+			spark:Destroy()
 		end
 	end)
 end
