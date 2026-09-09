@@ -116,7 +116,7 @@ function ShopService:Init(services)
 	if buyWeapon then
 		buyWeapon.OnServerInvoke = function(player, weaponType, tier, slotIndex)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false, error = "No profile" }
 			end
 			ensureInventory(profile)
@@ -143,6 +143,8 @@ function ShopService:Init(services)
 			if (profile.Gold or 0) < (stats.GoldCost or 0) then
 				return { success = false, error = "Not enough gold", profile = profilePayload(profile) }
 			end
+
+			local before = Util.DeepCopy(profile)
 			profile.Gold -= stats.GoldCost
 			if unlocked < tier then
 				profile.OwnedWeapons[weaponType] = tier
@@ -153,13 +155,16 @@ function ShopService:Init(services)
 			if not equipSlot or equipSlot < 1 or equipSlot > botCount then
 				equipSlot = findEquipSlot(profile, botCount) or 1
 			end
-			-- Экипируем только один слот (1 покупка = 1 единица)
 			profile.SquadLoadout[equipSlot] = { WeaponType = weaponType, Tier = tier }
 
 			DataService.MarkDirty(player, "BuyWeapon")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "BuyWeapon")
-			return { success = true, equippedSlot = equipSlot, profile = profilePayload(profile) }
+			local ok, err = DataService.FlushProfile(player, "BuyWeapon", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			return { success = true, equippedSlot = equipSlot, profile = profilePayload(DataService.GetProfile(player)) }
 		end
 	end
 
@@ -167,7 +172,7 @@ function ShopService:Init(services)
 	if buyArmor then
 		buyArmor.OnServerInvoke = function(player, tier, slotIndex)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -188,6 +193,8 @@ function ShopService:Init(services)
 			if (profile.Gold or 0) < data.GoldCost then
 				return { success = false, error = "Not enough gold", profile = profilePayload(profile) }
 			end
+
+			local before = Util.DeepCopy(profile)
 			profile.Gold -= data.GoldCost
 			if ownedMax < tier then
 				profile.OwnedArmorTier = tier
@@ -210,8 +217,12 @@ function ShopService:Init(services)
 
 			DataService.MarkDirty(player, "BuyArmor")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "BuyArmor")
-			return { success = true, equippedSlot = equipSlot, profile = profilePayload(profile) }
+			local ok, err = DataService.FlushProfile(player, "BuyArmor", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			return { success = true, equippedSlot = equipSlot, profile = profilePayload(DataService.GetProfile(player)) }
 		end
 	end
 
@@ -219,7 +230,7 @@ function ShopService:Init(services)
 	if setArmor then
 		setArmor.OnServerInvoke = function(player, slotIndex, tier)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -229,26 +240,28 @@ function ShopService:Init(services)
 			if slotIndex % 1 ~= 0 or slotIndex < 1 or slotIndex > botCount then
 				return { success = false, error = "Bad slot" }
 			end
+			local before = Util.DeepCopy(profile)
 			if tier == 0 then
 				profile.SquadArmor[slotIndex] = 0
-				DataService.MarkDirty(player, "SetSquadArmor")
-				DataService.NotifyProfile(player)
-				DataService.SaveProfile(player, true, true, "SetSquadArmor")
-				return { success = true, profile = profilePayload(profile) }
+			else
+				local copies = tonumber(profile.ArmorCopies[tier]) or 0
+				local equipped = countEquippedArmor(profile, tier)
+				local current = profile.SquadArmor[slotIndex] or 0
+				local freeing = current == tier and 1 or 0
+				if equipped - freeing >= copies then
+					return { success = false, error = "Нет свободной копии брони" }
+				end
+				profile.SquadArmor[slotIndex] = tier
+				profile.EquippedArmorTier = tier
 			end
-			local copies = tonumber(profile.ArmorCopies[tier]) or 0
-			local equipped = countEquippedArmor(profile, tier)
-			local current = profile.SquadArmor[slotIndex] or 0
-			local freeing = current == tier and 1 or 0
-			if equipped - freeing >= copies then
-				return { success = false, error = "Нет свободной копии брони" }
-			end
-			profile.SquadArmor[slotIndex] = tier
-			profile.EquippedArmorTier = tier
 			DataService.MarkDirty(player, "SetSquadArmor")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "SetSquadArmor")
-			return { success = true, profile = profilePayload(profile) }
+			local ok, err = DataService.FlushProfile(player, "SetSquadArmor", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			return { success = true, profile = profilePayload(DataService.GetProfile(player)) }
 		end
 	end
 
@@ -256,7 +269,7 @@ function ShopService:Init(services)
 	if setLoadout then
 		setLoadout.OnServerInvoke = function(player, slotIndex, weaponType, tier)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -283,11 +296,16 @@ function ShopService:Init(services)
 			if equipped - freeing >= copies then
 				return { success = false, error = "Нет свободной копии оружия" }
 			end
+			local before = Util.DeepCopy(profile)
 			profile.SquadLoadout[slotIndex] = { WeaponType = weaponType, Tier = tier }
 			DataService.MarkDirty(player, "SetSquadLoadout")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "SetSquadLoadout")
-			return { success = true, profile = profilePayload(profile) }
+			local ok, err = DataService.FlushProfile(player, "SetSquadLoadout", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			return { success = true, profile = profilePayload(DataService.GetProfile(player)) }
 		end
 	end
 end

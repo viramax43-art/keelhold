@@ -22,16 +22,14 @@ function UpgradeService:Init(services)
 	if upgrade then
 		upgrade.OnServerInvoke = function(player, statName, amount)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) or not UpgradesConfig.Stats[statName] then
+			if not profile or not DataService.CanMutateProfile(player) or not UpgradesConfig.Stats[statName] then
 				return { success = false }
 			end
-			-- Стата должна быть открыта текущим престижем
 			if not UpgradesConfig.IsStatUnlocked(statName, profile.PrestigePoints or 0) then
 				return { success = false, error = "Locked" }
 			end
 			local level = profile.Upgrades[statName] or 0
 
-			-- Мульти-покупка: 1 / 10 / 100 / "max"
 			local count = 1
 			if amount == "max" then
 				count = StatCalculator.GetAffordableUpgradeCount(statName, level, profile.XP or 0)
@@ -47,19 +45,31 @@ function UpgradeService:Init(services)
 				return { success = false, error = "Max level" }
 			end
 			if (profile.XP or 0) < cost then
-				-- Пытаемся купить меньше уровней, если хватает хотя бы на один
 				count = StatCalculator.GetAffordableUpgradeCount(statName, level, profile.XP or 0)
 				if count <= 0 then
 					return { success = false, error = "Not enough XP" }
 				end
 				cost = StatCalculator.GetBulkUpgradeCost(statName, level, count)
 			end
+
+			local before = Util.DeepCopy(profile)
 			profile.XP -= cost
 			profile.Upgrades[statName] = level + count
 			DataService.MarkDirty(player, "UpgradeStat")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "UpgradeStat")
-			return { success = true, level = level + count, bought = count, spent = cost, profile = Util.DeepCopy(profile) }
+			local ok, err = DataService.FlushProfile(player, "UpgradeStat", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			profile = DataService.GetProfile(player)
+			return {
+				success = true,
+				level = level + count,
+				bought = count,
+				spent = cost,
+				profile = Util.DeepCopy(profile),
+			}
 		end
 	end
 
@@ -67,7 +77,7 @@ function UpgradeService:Init(services)
 	if prestige then
 		prestige.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false, error = "No profile" }
 			end
 			if not UpgradesConfig.Prestige.Enabled then
@@ -78,14 +88,16 @@ function UpgradeService:Init(services)
 			if totalLevels < threshold then
 				return { success = false, error = string.format("Нужно %d уровней, сейчас %d", threshold, totalLevels) }
 			end
-			if DataService.BackupProfile then
-				DataService.BackupProfile(player, "PrestigeReset")
+
+			local backupOk = DataService.BackupProfile(player, "PrestigeReset")
+			if not backupOk then
+				return { success = false, error = "Не удалось создать резервную копию профиля" }
 			end
-			-- Сбрасываем прокачку и чекпоинт волны (вариант A), начисляем престиж.
+
+			local before = Util.DeepCopy(profile)
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.PrestigePoints = (profile.PrestigePoints or 0) + UpgradesConfig.Prestige.PointsPerReset
 			profile.LastCheckpoint = 0
-			-- Активный бой нельзя продолжать со старой волной на ослабленном игроке
 			local WaveService = services.WaveService
 			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
 				task.defer(function()
@@ -94,7 +106,12 @@ function UpgradeService:Init(services)
 			end
 			DataService.MarkDirty(player, "PrestigeReset")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "PrestigeReset")
+			local ok, err = DataService.FlushProfile(player, "PrestigeReset", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			profile = DataService.GetProfile(player)
 			return {
 				success = true,
 				points = profile.PrestigePoints,
@@ -108,7 +125,7 @@ function UpgradeService:Init(services)
 	if ascend then
 		ascend.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false, error = "No profile" }
 			end
 			if not UpgradesConfig.Ascension.Enabled then
@@ -118,10 +135,13 @@ function UpgradeService:Init(services)
 			if (profile.PrestigePoints or 0) < cost then
 				return { success = false, error = string.format("Нужно %d очков престижа, есть %d", cost, profile.PrestigePoints or 0) }
 			end
-			if DataService.BackupProfile then
-				DataService.BackupProfile(player, "Ascend")
+
+			local backupOk = DataService.BackupProfile(player, "Ascend")
+			if not backupOk then
+				return { success = false, error = "Не удалось создать резервную копию профиля" }
 			end
-			-- Вознесение: сжигаем очки престижа и уровни, волна снова с 1.
+
+			local before = Util.DeepCopy(profile)
 			profile.PrestigePoints = 0
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.Ascensions = (profile.Ascensions or 0) + 1
@@ -134,7 +154,12 @@ function UpgradeService:Init(services)
 			end
 			DataService.MarkDirty(player, "Ascend")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true, true, "Ascend")
+			local ok, err = DataService.FlushProfile(player, "Ascend", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
+			profile = DataService.GetProfile(player)
 			return {
 				success = true,
 				ascensions = profile.Ascensions,

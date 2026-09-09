@@ -120,7 +120,7 @@ end
 
 function RewardService.OnEnemyKilled(player: Player)
 	local profile = DataService.GetProfile(player)
-	if profile and DataService.IsProfileLoaded(player) and profile.Stats then
+	if profile and DataService.CanMutateProfile(player) and profile.Stats then
 		profile.Stats.TotalKills = (profile.Stats.TotalKills or 0) + 1
 		DataService.MarkDirty(player, "TotalKills")
 		DataService.SaveProfile(player, false)
@@ -160,7 +160,7 @@ function RewardService.GrantWaveClear(players: { Player }, wave: number): { [num
 			local beforeG, beforeX = RewardService.GetWaveEarnings(p)
 			credit(p, gold, xp, "wave_clear")
 			local profile = DataService.GetProfile(p)
-			if profile and DataService.IsProfileLoaded(p) then
+			if profile and DataService.CanMutateProfile(p) then
 				profile.HighestWave = math.max(profile.HighestWave or 0, wave)
 				if profile.Stats then
 					profile.Stats.TotalWaves = (profile.Stats.TotalWaves or 0) + 1
@@ -170,7 +170,7 @@ function RewardService.GrantWaveClear(players: { Player }, wave: number): { [num
 				end
 				DataService.MarkDirty(p, "WaveClear")
 				task.spawn(function()
-					DataService.SaveProfile(p, true, true, "WaveClear")
+					DataService.FlushProfile(p, "WaveClear", false)
 				end)
 			end
 			perPlayer[p.UserId] = {
@@ -194,7 +194,7 @@ function RewardService.GrantDefeatConsolation(players: { Player }, wave: number)
 			local sessG, sessX = RewardService.GetSessionEarnings(p)
 			credit(p, gold, xp, "defeat_consolation")
 			task.spawn(function()
-				DataService.SaveProfile(p, true)
+				DataService.FlushProfile(p, "DefeatConsolation", false)
 			end)
 			perPlayer[p.UserId] = {
 				gold = sessG + gold,

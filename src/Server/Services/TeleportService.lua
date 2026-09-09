@@ -84,21 +84,45 @@ function TeleportService.StartBattle(player: Player)
 	end
 
 	local players = {}
+	local released = {}
 	for _, m in ipairs(party.Members) do
 		if m.Parent then
-			table.insert(players, m)
-			if DataService then
-				task.spawn(function()
-					DataService.SaveProfile(m, true)
-				end)
+			if not DataService.IsProfileLoaded(m) then
+				for _, r in ipairs(released) do
+					DataService.ReacquireProfile(r)
+				end
+				return { success = false, error = "Профиль участника не загружен" }
 			end
+			local flushOk, flushErr = DataService.FlushAndReleaseProfile(m, "Teleport")
+			if not flushOk then
+				Log.Write("Battle", "FlushAndRelease failed for " .. m.Name .. ": " .. tostring(flushErr), "ERROR")
+				for _, r in ipairs(released) do
+					local reOk = DataService.ReacquireProfile(r)
+					if not reOk and r.Parent then
+						r:Kick("Не удалось восстановить профиль после отмены телепорта. Переподключитесь.")
+					end
+				end
+				return {
+					success = false,
+					error = "Не удалось сохранить профиль перед телепортацией",
+				}
+			end
+			table.insert(released, m)
+			table.insert(players, m)
 		end
 	end
+
 	local teleportOk, teleportError = pcall(function()
 		TeleportServiceRoblox:TeleportToPrivateServer(battlePlaceId, code, players, nil, teleportData)
 	end)
 	if not teleportOk then
 		Log.Write("Battle", "Teleport failed: " .. tostring(teleportError), "ERROR")
+		for _, m in ipairs(released) do
+			local reOk = DataService.ReacquireProfile(m)
+			if not reOk and m.Parent then
+				m:Kick("Телепорт не удался, профиль освобождён. Пожалуйста, переподключитесь.")
+			end
+		end
 		return { success = false, error = "Телепорт не удался" }
 	end
 	return { success = true, message = "Телепорт..." }

@@ -4,10 +4,16 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
+local Util = require(ReplicatedStorage.Shared.Util.Util)
 
 local PromocodeService = {}
 local codes = {} -- code -> { Type, Amount, Multiplier, Duration }
 local store = nil
+
+local DEFAULT_CODES = {
+	BRIDGE100 = { Type = "Gold", Amount = 100 },
+	XP50 = { Type = "XP", Amount = 50 },
+}
 
 local function getStore()
 	if store ~= nil then
@@ -18,6 +24,24 @@ local function getStore()
 	end)
 	store = ok and s or false
 	return store
+end
+
+local function persistCodes()
+	local s = getStore()
+	if not s then
+		return false
+	end
+	local snapshot = codes
+	local ok = pcall(function()
+		s:UpdateAsync("All", function(current)
+			local merged = if type(current) == "table" then current else {}
+			for code, def in pairs(snapshot) do
+				merged[code] = def
+			end
+			return merged
+		end)
+	end)
+	return ok
 end
 
 function PromocodeService:Init(services)
@@ -34,10 +58,10 @@ function PromocodeService:Init(services)
 		end)
 	end
 
-	-- Studio defaults
 	if next(codes) == nil then
-		codes["BRIDGE100"] = { Type = "Gold", Amount = 100 }
-		codes["XP50"] = { Type = "XP", Amount = 50 }
+		for code, def in pairs(DEFAULT_CODES) do
+			codes[code] = def
+		end
 	end
 
 	local redeem = RemoteService.GetRemote(RemoteNames.RedeemPromocode)
@@ -49,20 +73,32 @@ function PromocodeService:Init(services)
 				return { success = false, error = "Invalid code" }
 			end
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false }
 			end
 			if profile.UsedPromocodes[code] then
 				return { success = false, error = "Already used" }
 			end
+			local before = Util.DeepCopy(profile)
 			profile.UsedPromocodes[code] = os.time()
-			DataService.MarkDirty(player, "Promocode")
 			if def.Type == "Gold" then
-				DataService.AddGold(player, def.Amount or 0, "promo")
+				profile.Gold = (profile.Gold or 0) + (def.Amount or 0)
 			elseif def.Type == "XP" then
-				DataService.AddXP(player, def.Amount or 0, "promo")
+				profile.XP = (profile.XP or 0) + (def.Amount or 0)
+				profile.TotalXP = (profile.TotalXP or 0) + (def.Amount or 0)
+				profile.Level = Util.LevelFromTotalXP(
+					profile.TotalXP,
+					GameConfig.XPPerLevel,
+					GameConfig.XPPerLevelGrowth
+				)
 			end
-			DataService.SaveProfile(player, true, true, "Promocode")
+			DataService.MarkDirty(player, "Promocode")
+			DataService.NotifyProfile(player)
+			local ok, err = DataService.FlushProfile(player, "Promocode", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
 			return { success = true }
 		end
 	end
@@ -79,23 +115,12 @@ function PromocodeService:Init(services)
 			Type = def.Type,
 			Amount = math.clamp(math.floor(tonumber(def.Amount) or 0), 0, 1000000),
 		}
-		local s = getStore()
-		if s then
-			pcall(function()
-				s:SetAsync("All", codes)
-			end)
-		end
-		return true
+		return persistCodes()
 	end
 
 	if RunService:IsServer() then
 		game:BindToClose(function()
-			local s = getStore()
-			if s then
-				pcall(function()
-					s:SetAsync("All", codes)
-				end)
-			end
+			persistCodes()
 		end)
 	end
 end

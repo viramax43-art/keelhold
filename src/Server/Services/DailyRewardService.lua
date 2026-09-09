@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
+local Util = require(ReplicatedStorage.Shared.Util.Util)
 
 local DailyRewardService = {}
 
@@ -15,7 +16,7 @@ function DailyRewardService:Init(services)
 	if claim then
 		claim.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile or not DataService.IsProfileLoaded(player) then
+			if not profile or not DataService.CanMutateProfile(player) then
 				return { success = false }
 			end
 			local now = os.time()
@@ -30,12 +31,20 @@ function DailyRewardService:Init(services)
 				streak = 1
 			end
 			local reward = GameConfig.DailyRewards[streak] or GameConfig.DailyRewards[1]
+			local before = Util.DeepCopy(profile)
 			profile.DailyReward.LastClaimTime = now
 			profile.DailyReward.StreakDay = streak
+			profile.Gold = (profile.Gold or 0) + (reward.Gold or 0)
+			profile.XP = (profile.XP or 0) + (reward.XP or 0)
+			profile.TotalXP = (profile.TotalXP or 0) + (reward.XP or 0)
+			profile.Level = Util.LevelFromTotalXP(profile.TotalXP, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
 			DataService.MarkDirty(player, "DailyReward")
-			DataService.AddGold(player, reward.Gold or 0, "daily")
-			DataService.AddXP(player, reward.XP or 0, "daily")
-			DataService.SaveProfile(player, true, true, "DailyReward")
+			DataService.NotifyProfile(player)
+			local ok, err = DataService.FlushProfile(player, "DailyReward", false)
+			if not ok then
+				DataService.RestoreSnapshot(player, before)
+				return { success = false, error = err or "Не удалось сохранить профиль" }
+			end
 			return { success = true, streak = streak, reward = reward }
 		end
 	end
