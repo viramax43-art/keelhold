@@ -452,11 +452,12 @@ function WaveService.StartBattle(teleportData)
 				end
 			end
 			char:SetAttribute("Spectator", true)
-			-- Наблюдатель ходит по земле (без полёта / без подъёма над мостом)
-			local folder = workspace:FindFirstChild("MapPoints")
-			local spawn = folder and folder:FindFirstChild("DefenseSpawn1")
-			if spawn and spawn:IsA("BasePart") then
-				hrp.CFrame = spawn.CFrame + Vector3.new(0, 3, -8)
+			-- На настиле моста, чуть позади линии обороны (не world-offset — иначе падают с моста)
+			local stand = MapBind.GetSpectatorStandCFrame()
+			if stand then
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.AssemblyAngularVelocity = Vector3.zero
+				hrp.CFrame = stand
 			end
 		end
 		if player.Character then

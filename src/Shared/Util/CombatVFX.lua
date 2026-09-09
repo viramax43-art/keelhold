@@ -14,6 +14,26 @@ local function ensureFolder(): Folder
 	return folder
 end
 
+function CombatVFX.ShowDebugMarkers(): boolean
+	return workspace:GetAttribute("BD_DebugCombat") == true
+end
+
+function CombatVFX.GetMuzzleWorldPosition(model: Model?): Vector3?
+	if not model then
+		return nil
+	end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("Attachment") and d.Name == "Muzzle" then
+			return d.WorldPosition
+		end
+	end
+	local root = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return root.Position + Vector3.new(0, 1.2, 0)
+	end
+	return nil
+end
+
 function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3)
 	local folder = ensureFolder()
 	local attach = Instance.new("Part")
@@ -33,7 +53,7 @@ function CombatVFX.PlayMuzzle(origin: Vector3, target: Vector3)
 	beam.Size = Vector3.new(0.08, 0.08, dist)
 	beam.CFrame = CFrame.lookAt(origin, target) * CFrame.new(0, 0, -dist / 2)
 	beam.Parent = attach
-	task.delay(0.5, function()
+	task.delay(0.12, function()
 		if attach and attach.Parent then
 			attach:Destroy()
 		end
@@ -51,42 +71,54 @@ function CombatVFX.PlayMiss(origin: Vector3, aim: Vector3)
 		1 + (math.random() - 0.5) * 3,
 		(math.random() - 0.5) * 6
 	)
-	local spark = Instance.new("Part")
-	spark.Name = "MissSpark"
-	spark.Anchored = true
-	spark.CanCollide = false
-	spark.Material = Enum.Material.Neon
-	spark.Color = Color3.fromRGB(220, 230, 255)
-	spark.Size = Vector3.new(0.7, 0.7, 0.7)
-	spark.Position = missPoint
-	spark.Parent = folder
+
+	-- Обычная игра: короткий тусклый трассёр без маркера «промах»
 	local trail = Instance.new("Part")
+	trail.Name = "MissTrail"
 	trail.Anchored = true
 	trail.CanCollide = false
 	trail.Material = Enum.Material.Neon
 	trail.Color = Color3.fromRGB(170, 185, 220)
-	trail.Transparency = 0.2
+	trail.Transparency = 0.45
 	local dist = math.max(0.1, (missPoint - origin).Magnitude)
-	trail.Size = Vector3.new(0.08, 0.08, dist)
+	trail.Size = Vector3.new(0.05, 0.05, dist)
 	trail.CFrame = CFrame.lookAt(origin, missPoint) * CFrame.new(0, 0, -dist / 2)
-	trail.Parent = spark
-	local bill = Instance.new("BillboardGui")
-	bill.Size = UDim2.new(0, 70, 0, 22)
-	bill.StudsOffset = Vector3.new(0, 1.2, 0)
-	bill.AlwaysOnTop = true
-	bill.Parent = spark
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
-	label.Text = "промах"
-	label.TextColor3 = Color3.fromRGB(200, 210, 230)
-	label.TextStrokeTransparency = 0.4
-	label.Font = Enum.Font.GothamBold
-	label.TextSize = 14
-	label.Parent = bill
-	task.delay(0.55, function()
-		if spark and spark.Parent then
-			spark:Destroy()
+	trail.Parent = folder
+
+	if CombatVFX.ShowDebugMarkers() then
+		local spark = Instance.new("Part")
+		spark.Name = "MissSpark"
+		spark.Anchored = true
+		spark.CanCollide = false
+		spark.Material = Enum.Material.Neon
+		spark.Color = Color3.fromRGB(220, 230, 255)
+		spark.Size = Vector3.new(0.55, 0.55, 0.55)
+		spark.Position = missPoint
+		spark.Parent = folder
+		local bill = Instance.new("BillboardGui")
+		bill.Size = UDim2.new(0, 70, 0, 22)
+		bill.StudsOffset = Vector3.new(0, 1.2, 0)
+		bill.AlwaysOnTop = true
+		bill.Parent = spark
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		label.Text = "промах"
+		label.TextColor3 = Color3.fromRGB(200, 210, 230)
+		label.TextStrokeTransparency = 0.4
+		label.Font = Enum.Font.GothamBold
+		label.TextSize = 14
+		label.Parent = bill
+		task.delay(0.55, function()
+			if spark and spark.Parent then
+				spark:Destroy()
+			end
+		end)
+	end
+
+	task.delay(0.1, function()
+		if trail and trail.Parent then
+			trail:Destroy()
 		end
 	end)
 end

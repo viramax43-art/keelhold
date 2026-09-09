@@ -61,9 +61,11 @@ local function getStore()
 end
 
 local function loadFromStudioModule(userId: number)
-	local dataFolder = script.Parent.Parent:FindFirstChild("Data")
+	local serverFolder = script.Parent and script.Parent.Parent
+	local dataFolder = serverFolder and serverFolder:FindFirstChild("Data")
 	local mod = dataFolder and dataFolder:FindFirstChild("StudioProfiles")
-	if not mod then
+	if not mod or not mod:IsA("ModuleScript") then
+		Log.Write("Data", "StudioProfiles module missing under Server.Data", "WARN")
 		return nil
 	end
 	-- Clone + require, иначе Rojo-обновление Source не видно из-за кэша require
@@ -80,6 +82,7 @@ local function loadFromStudioModule(userId: number)
 	if not ok or type(tbl) ~= "table" then
 		ok, tbl = pcall(require, mod)
 		if not ok or type(tbl) ~= "table" then
+			Log.Write("Data", "StudioProfiles require failed: " .. tostring(tbl), "WARN")
 			return nil
 		end
 	end
@@ -93,6 +96,7 @@ local function loadFromStudioModule(userId: number)
 	if okJ and type(data) == "table" then
 		return data
 	end
+	Log.Write("Data", "StudioProfiles JSON decode failed for " .. tostring(userId), "WARN")
 	return nil
 end
 
@@ -149,6 +153,21 @@ local function httpLoadProfile(userId: number)
 	return nil
 end
 
+-- Не ждать вечно, если LogServer тупит; модуль StudioProfiles — основной fallback
+local function httpLoadProfileTimed(userId: number, timeoutSec: number?)
+	local result = nil
+	local done = false
+	task.spawn(function()
+		result = httpLoadProfile(userId)
+		done = true
+	end)
+	local deadline = os.clock() + (timeoutSec or 1.5)
+	while not done and os.clock() < deadline do
+		task.wait(0.05)
+	end
+	return result
+end
+
 local function studioLoad(userId: number)
 	-- Берём САМЫЙ богатый источник: модуль Rojo и/или LogServer HTTP
 	local best = nil
@@ -164,8 +183,9 @@ local function studioLoad(userId: number)
 			Log.Write("Data", string.format("studioLoad candidate %s score=%d Gold=%s", src, s, tostring(data.Gold)))
 		end
 	end
-	consider(httpLoadProfile(userId), "LogServer")
+	-- Сначала модуль (мгновенно), потом HTTP
 	consider(loadFromStudioModule(userId), "StudioProfiles")
+	consider(httpLoadProfileTimed(userId, 1.5), "LogServer")
 	return best
 end
 
@@ -199,8 +219,9 @@ local function studioSave(userId: number, profile, force: boolean?): boolean
 	local totalXp = tonumber(clean.TotalXP) or 0
 	local wave = tonumber(clean.HighestWave) or 0
 
+	-- Только модуль Rojo (без HTTP) — иначе зависший LogServer блокирует сейв навсегда
 	if not force then
-		local existing = httpLoadProfile(userId) or loadFromStudioModule(userId)
+		local existing = loadFromStudioModule(userId)
 		if existing and isStaleVsExisting(clean, existing) then
 			Log.Write(
 				"Data",
@@ -216,39 +237,41 @@ local function studioSave(userId: number, profile, force: boolean?): boolean
 		end
 	end
 
-	-- Короткий маркер (не обрежется Output) → Watch-Logs может патчить Gold/XP
-	print(string.format("[BridgeDefense][Data] __BD_PROFILE_META__|%d|%d|%d|%d|%d", userId, gold, xp, totalXp, wave))
+	-- Маркеры в Output (Watch-Logs). Полный JSON только print — НЕ через /log
+	-- (иначе старые батчи Log.Write дают Skip stale и рвут соединения).
+	local meta = string.format("__BD_PROFILE_META__|%d|%d|%d|%d|%d", userId, gold, xp, totalXp, wave)
+	print(string.format("[BridgeDefense][Data] %s", meta))
+	if #json < 12000 then
+		print(string.format("[BridgeDefense][Data] __BD_PROFILE_SAVE__|%d|%s", userId, json))
+	end
+	-- Короткий META в /log (без полного JSON) — запасной канал
+	Log.Write("Data", meta)
 
-	-- Полный JSON через HTTP (основной надёжный путь)
-	local httpOk = false
-	for _, host in ipairs({ "127.0.0.1", "localhost" }) do
-		local url = string.format("http://%s:8765/profile/%d", host, userId)
-		if force then
-			url ..= "?force=1"
-		end
+	-- HTTP профиль в фоне (один POST)
+	task.spawn(function()
+		pcall(function()
+			HttpService.HttpEnabled = true
+		end)
+		local url = string.format("http://127.0.0.1:8765/profile/%d%s", userId, force and "?force=1" or "")
 		local okPost, err = pcall(function()
 			HttpService:PostAsync(url, json, Enum.HttpContentType.ApplicationJson)
 		end)
 		if okPost then
-			httpOk = true
-			Log.Write("Data", string.format("LogServer save OK userId=%d Gold=%d TotalXP=%d", userId, gold, totalXp))
-			break
+			-- без лишнего Log.Write — меньше /log спама во время боя
 		else
-			Log.Write("Data", "LogServer POST fail: " .. tostring(err), "WARN")
+			local ok2 = pcall(function()
+				HttpService:PostAsync(
+					string.format("http://localhost:8765/profile/%d%s", userId, force and "?force=1" or ""),
+					json,
+					Enum.HttpContentType.ApplicationJson
+				)
+			end)
+			if not ok2 then
+				Log.Write("Data", "LogServer POST fail (markers still emitted): " .. tostring(err), "WARN")
+			end
 		end
-	end
+	end)
 
-	-- Полный маркер в Output (если JSON не огромный) → Watch-Logs
-	if #json < 12000 then
-		print(string.format("[BridgeDefense][Data] __BD_PROFILE_SAVE__|%d|%s", userId, json))
-	else
-		warn("[BridgeDefense][Data] profile json too large for Output marker; rely on LogServer HTTP")
-	end
-
-	if not httpOk then
-		-- Watch-Logs + Studio-плагин Persist всё равно подхватят маркеры из Output
-		Log.Write("Data", "HTTP save skipped; Output markers emitted for Watch-Logs/Plugin", "WARN")
-	end
 	return true
 end
 
@@ -401,17 +424,17 @@ function DataService.SaveProfile(player: Player, immediate: boolean?, bypassRate
 			return
 		end
 		saveDebounce[userId] = true
-		task.delay(1.5, function()
+		task.delay(3.0, function()
 			saveDebounce[userId] = nil
 			DataService.SaveProfile(player, true)
 		end)
 		return
 	end
 	local now = os.clock()
-	if not bypassRateLimit and lastSaveClock[userId] and (now - lastSaveClock[userId]) < 0.5 then
+	if not bypassRateLimit and lastSaveClock[userId] and (now - lastSaveClock[userId]) < 2.0 then
 		if not forcedSaveQueued[userId] then
 			forcedSaveQueued[userId] = true
-			local waitTime = math.max(0.05, 0.5 - (now - lastSaveClock[userId]))
+			local waitTime = math.max(0.05, 2.0 - (now - lastSaveClock[userId]))
 			task.delay(waitTime, function()
 				forcedSaveQueued[userId] = nil
 				if profiles[userId] and player.Parent then
@@ -443,7 +466,7 @@ function DataService.SaveProfile(player: Player, immediate: boolean?, bypassRate
 	end
 
 	if RunService:IsStudio() then
-		local existing = studioLoad(userId)
+		local existing = loadFromStudioModule(userId)
 		if existing and isStaleVsExisting(profile, existing) then
 			Log.Write(
 				"Data",
@@ -605,11 +628,11 @@ function DataService:Init(services)
 		task.wait(1.5)
 	end)
 
-	-- Автосейв в Studio каждые 15с (маркер в Output → диск)
+	-- Автосейв в Studio каждые 8с
 	if RunService:IsStudio() then
 		task.spawn(function()
 			while true do
-				task.wait(15)
+				task.wait(8)
 				for _, player in ipairs(Players:GetPlayers()) do
 					if profiles[player.UserId] then
 						DataService.SaveProfile(player, true, true)

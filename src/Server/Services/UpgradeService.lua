@@ -77,14 +77,23 @@ function UpgradeService:Init(services)
 			if totalLevels < threshold then
 				return { success = false, error = string.format("Нужно %d уровней, сейчас %d", threshold, totalLevels) }
 			end
-			-- Сбрасываем прокачку, начисляем престиж.
+			-- Сбрасываем прокачку и чекпоинт волны (вариант A), начисляем престиж.
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.PrestigePoints = (profile.PrestigePoints or 0) + UpgradesConfig.Prestige.PointsPerReset
+			profile.LastCheckpoint = 0
+			-- Активный бой нельзя продолжать со старой волной на ослабленном игроке
+			local WaveService = services.WaveService
+			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
+				task.defer(function()
+					WaveService.EndBattle(false)
+				end)
+			end
 			DataService.NotifyProfile(player)
 			DataService.SaveProfile(player, true)
 			return {
 				success = true,
 				points = profile.PrestigePoints,
+				waveReset = true,
 				profile = Util.DeepCopy(profile),
 			}
 		end
@@ -104,10 +113,17 @@ function UpgradeService:Init(services)
 			if (profile.PrestigePoints or 0) < cost then
 				return { success = false, error = string.format("Нужно %d очков престижа, есть %d", cost, profile.PrestigePoints or 0) }
 			end
-			-- Вознесение: сжигаем очки престижа и уровни, получаем постоянный множитель.
+			-- Вознесение: сжигаем очки престижа и уровни, волна снова с 1.
 			profile.PrestigePoints = 0
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
 			profile.Ascensions = (profile.Ascensions or 0) + 1
+			profile.LastCheckpoint = 0
+			local WaveService = services.WaveService
+			if WaveService and WaveService.IsBattleActive and WaveService.IsBattleActive() and WaveService.EndBattle then
+				task.defer(function()
+					WaveService.EndBattle(false)
+				end)
+			end
 			DataService.NotifyProfile(player)
 			DataService.SaveProfile(player, true)
 			return {

@@ -59,7 +59,8 @@ function Log.Write(tag: string, message: string, level: string?)
 	if RunService:IsServer() and RunService:IsStudio() then
 		table.insert(queue, line)
 		ensureFlush()
-		if #queue >= 20 then
+		-- Профиль / ошибки — сразу на диск, не ждать батч 2с
+		if #queue >= 20 or string.find(message, "__BD_PROFILE_", 1, true) or level == "ERROR" then
 			flushHttp()
 		end
 	end

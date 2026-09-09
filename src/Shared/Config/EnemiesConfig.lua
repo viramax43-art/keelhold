@@ -52,7 +52,15 @@ local EnemiesConfig = {
 	},
 
 	AttackRange = 180,
-	StopRange = 42,
+	-- Линия атаки у обороны (ближе — чтобы враги реально доходили)
+	StopRange = 16,
+	MeleeRange = 18,
+	MeleeDamageMult = 2.2,
+	MeleeFireRate = 0.45,
+	-- Полосы моста + очередь атаки
+	LaneCount = 6,
+	MinSpacing = 5.5,
+	MaxAttackers = 4,
 }
 
 return EnemiesConfig

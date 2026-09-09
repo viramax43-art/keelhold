@@ -117,6 +117,7 @@ function StatCalculator.BuildCombatStats(profile, slotIndex: number?)
 		FireRate = weapon and (weapon.FireRate / math.max(reloadMult, 0.1)) or 0.5,
 		Range = weapon and weapon.Range or 80,
 		Accuracy = finalAccuracy,
+		Spread = weapon and (weapon.Spread or 0.2) or 0.2,
 		CritChance = stat("CritChance"),
 		CritDamage = stat("CritDamage"),
 		BotDamageMult = stat("BotDamage"),

@@ -1,11 +1,10 @@
-# Автономный запуск Studio: Play без ручного Rojo Connect / HTTP Settings
+# Autonomous Studio launch: Play without manual Rojo Connect / HTTP Settings
 # Usage: .\open-studio.ps1
-#        .\open-studio.ps1 -Live          live-синк Rojo (нужен Connect)
-#        .\open-studio.ps1 -BuildPackaged ещё и пересобрать map-пакет
+#        .\open-studio.ps1 -Live          live Rojo sync (needs Connect)
+#        .\open-studio.ps1 -BuildPackaged also rebuild map pack
 #
-# По умолчанию: собирает BridgeDefense_Commission.rbxl со ВСЕМИ скриптами
-# + StudioProfiles, поднимает LogServer/Watch-Logs, ставит плагин Persist.
-# Тебе остаётся только F5 (Play).
+# Default: builds BridgeDefense_Commission.rbxl with all scripts + StudioProfiles,
+# starts LogServer/Watch-Logs, installs Persist plugin. Then just press F5.
 
 param(
     [switch]$Live,
@@ -21,7 +20,6 @@ $Lune = Join-Path $env:USERPROFILE '.local\bin\lune.exe'
 $Place2 = Join-Path $ProjectRoot 'Commission_place (2).rbxl'
 $Place1 = Join-Path $ProjectRoot 'Commission_place (1).rbxl'
 $Packaged = Join-Path $ProjectRoot 'BridgeDefense_Commission.rbxl'
-$RojoProject = Join-Path $ProjectRoot 'commission-place.project.json'
 $LobbyProject = Join-Path $ProjectRoot 'lobby.project.json'
 $PluginSrc = Join-Path $ProjectRoot 'tools\BridgeDefensePersist.plugin.lua'
 $PluginsDir = Join-Path $env:LOCALAPPDATA 'Roblox\Plugins'
@@ -38,17 +36,14 @@ function Install-PersistPlugin {
     }
     New-Item -ItemType Directory -Force -Path $PluginsDir | Out-Null
     $src = [System.IO.File]::ReadAllText($PluginSrc)
-    $rbxmx = @"
-<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
-	<Item class="Script">
-		<Properties>
-			<string name="Name">BridgeDefensePersist</string>
-			<ProtectedString name="Source"><![CDATA[$src]]></ProtectedString>
-			<bool name="Enabled">true</bool>
-		</Properties>
-	</Item>
-</roblox>
-"@
+    # Escape CDATA end sequence if present in plugin source
+    $safeSrc = $src.Replace(']]>', ']]]]><![CDATA[>')
+    $rbxmx = '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">' +
+        '<Item class="Script"><Properties>' +
+        '<string name="Name">BridgeDefensePersist</string>' +
+        '<ProtectedString name="Source"><![CDATA[' + $safeSrc + ']]></ProtectedString>' +
+        '<bool name="Enabled">true</bool>' +
+        '</Properties></Item></roblox>'
     $out = Join-Path $PluginsDir 'BridgeDefensePersist.rbxmx'
     [System.IO.File]::WriteAllText($out, $rbxmx, [System.Text.UTF8Encoding]::new($false))
     Write-Host "Persist plugin installed: $out" -ForegroundColor Green
@@ -58,9 +53,10 @@ function Start-ProfileDb {
     $logCapture = Join-Path $ProjectRoot 'tools\Start-LogCapture.ps1'
     if (Test-Path -LiteralPath $logCapture) {
         & $logCapture
-    } else {
-        Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $ProjectRoot 'tools\LogServer.ps1')) -WindowStyle Minimized
-        Start-Process powershell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $ProjectRoot 'tools\Watch-Logs.ps1')) -WindowStyle Minimized
+    }
+    else {
+        Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot 'tools\LogServer.ps1')) -WindowStyle Minimized
+        Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot 'tools\Watch-Logs.ps1')) -WindowStyle Minimized
     }
 
     Write-Host 'Waiting for profile DB on :8765 ...' -ForegroundColor Cyan
@@ -70,7 +66,8 @@ function Start-ProfileDb {
             Invoke-WebRequest -Uri 'http://127.0.0.1:8765/profile/0' -Method GET -TimeoutSec 1 -UseBasicParsing -ErrorAction Stop | Out-Null
             $dbReady = $true
             break
-        } catch {
+        }
+        catch {
             if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
                 $dbReady = $true
                 break
@@ -80,7 +77,8 @@ function Start-ProfileDb {
     }
     if ($dbReady) {
         Write-Host 'Profile DB ready (LogServer :8765 + Watch-Logs)' -ForegroundColor Green
-    } else {
+    }
+    else {
         Write-Host 'WARN: Profile DB not responding - Gold/XP may not persist' -ForegroundColor Red
     }
 }
@@ -103,9 +101,6 @@ New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot 'logs\profiles
 Install-PersistPlugin
 Start-ProfileDb
 
-# Перегенерировать StudioProfiles.lua из JSON перед сборкой
-$regen = Join-Path $ProjectRoot 'tools\LogServer.ps1'
-# LogServer already regenerates on start; ensure module matches JSON
 $profileDir = Join-Path $ProjectRoot 'logs\profiles'
 $studioProfiles = Join-Path $ProjectRoot 'src\Server\Data\StudioProfiles.lua'
 if (Test-Path $profileDir) {
@@ -129,21 +124,22 @@ if (Test-Path $profileDir) {
 $OpenPlace = $null
 
 if ($Live) {
-    # Dev: карта из Commission_place + live Rojo (нужен Connect)
     if (Test-Path -LiteralPath $Place2) {
         $OpenPlace = $Place2
-    } elseif (Test-Path -LiteralPath $Place1) {
+    }
+    elseif (Test-Path -LiteralPath $Place1) {
         $OpenPlace = $Place1
         Write-Host 'WARN: Commission_place (2).rbxl missing, using (1)' -ForegroundColor Yellow
-    } else {
+    }
+    else {
         Write-Host 'Commission_place (2).rbxl not found.' -ForegroundColor Red
         exit 1
     }
     Write-Host 'Rojo serve (LIVE): commission-place.project.json' -ForegroundColor Cyan
     Start-Process -FilePath $Rojo -ArgumentList @('serve', 'commission-place.project.json') -WorkingDirectory $ProjectRoot -WindowStyle Normal
     Start-Sleep -Seconds 1
-} else {
-    # Автономно: place уже со скриптами — Connect не нужен
+}
+else {
     if ($BuildPackaged -and (Test-Path $Lune)) {
         Write-Host 'Extracting map...' -ForegroundColor Cyan
         Push-Location $ProjectRoot
@@ -161,6 +157,10 @@ if ($Live) {
     }
     $OpenPlace = $Packaged
     Write-Host "Built: $Packaged" -ForegroundColor Green
+    # Serve anyway so Plugins -> Rojo -> Connect works if you click it
+    Write-Host 'Rojo serve (optional Connect): lobby.project.json :34872' -ForegroundColor Cyan
+    Start-Process -FilePath $Rojo -ArgumentList @('serve', 'lobby.project.json') -WorkingDirectory $ProjectRoot -WindowStyle Minimized
+    Start-Sleep -Seconds 1
 }
 
 $studio = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Roblox\Versions') -Recurse -Filter 'RobloxStudioBeta.exe' -ErrorAction SilentlyContinue |
@@ -171,25 +171,27 @@ if ($studio) {
     $leaf = Split-Path -Leaf $OpenPlace
     Write-Host "Opening: $leaf" -ForegroundColor Cyan
     Start-Process -FilePath $studio.FullName -ArgumentList ('"{0}"' -f $OpenPlace)
-} else {
+}
+else {
     Write-Host "Roblox Studio not found - open manually: $OpenPlace" -ForegroundColor Yellow
 }
 
 Write-Host ''
 Write-Host '========================================' -ForegroundColor Green
 if ($Live) {
-    Write-Host ' LIVE MODE: нужен Plugins → Rojo → Connect' -ForegroundColor Yellow
+    Write-Host ' LIVE MODE: Plugins -> Rojo -> Connect required' -ForegroundColor Yellow
     Write-Host ' Place: Commission_place + rojo serve' -ForegroundColor Green
-} else {
-    Write-Host ' АВТОНОМНЫЙ РЕЖИМ (без Connect)' -ForegroundColor Green
-    Write-Host ' Place: BridgeDefense_Commission.rbxl' -ForegroundColor Green
-    Write-Host ' Скрипты уже внутри place — сразу F5' -ForegroundColor Green
+}
+else {
+    Write-Host ' AUTONOMOUS MODE' -ForegroundColor Green
+    Write-Host ' Place: BridgeDefense_Commission.rbxl — press F5 (scripts already inside)' -ForegroundColor Green
+    Write-Host ' Rojo Connect is OPTIONAL. If you want it: Plugins -> Rojo -> Connect localhost:34872' -ForegroundColor Cyan
 }
 Write-Host ' Profile DB: logs\profiles + LogServer :8765' -ForegroundColor Green
 Write-Host ' Plugin: BridgeDefensePersist (HTTP auto)' -ForegroundColor Green
 Write-Host '========================================' -ForegroundColor Green
-Write-Host '1. Дождись загрузки Studio'
-Write-Host '2. Нажми F5 (Play)'
-Write-Host '3. В Output: DB load OK ... Gold=... и LogServer save OK / Plugin profile saved'
-Write-Host '4. Stop можно сразу — сейв идёт на каждый AddGold/autosave'
+Write-Host '1. Wait until Studio finishes loading'
+Write-Host '2. Press F5 (Play)'
+Write-Host '3. Output: DB load OK ... Gold=... and LogServer save OK'
+Write-Host '4. Stop anytime - save runs on AddGold/autosave'
 Write-Host '========================================' -ForegroundColor Green

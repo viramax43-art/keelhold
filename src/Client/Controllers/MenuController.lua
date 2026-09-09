@@ -732,7 +732,7 @@ local function showUpgrade()
 		pbc.Parent = pb
 		if canPrestige then
 			pb.BackgroundColor3 = Color3.fromRGB(130, 80, 180)
-			pb.Text = string.format("Сбросить %d уровней → +%d престиж", totalUpgradeLevels, UpgradesConfig.Prestige.PointsPerReset)
+			pb.Text = string.format("Сбросить %d ур. → +%d престиж (волна → 1)", totalUpgradeLevels, UpgradesConfig.Prestige.PointsPerReset)
 			pb.MouseButton1Click:Connect(function()
 				runMenuAction(function()
 					local res = invoke(RemoteNames.PrestigeReset)

@@ -103,6 +103,7 @@ local GameConfig = {
 		EnemySpawnInterval = 0.22,
 		EnemyGroupSize = 4,
 		EnemyGroupGap = 0.75,
+		-- Debug: workspace:SetAttribute("BD_DebugCombat", true) — маркеры промаха
 	},
 
 	-- XP за уровень (экспоненциальный рост через XPPerLevelGrowth)

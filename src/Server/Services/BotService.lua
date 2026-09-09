@@ -64,6 +64,7 @@ local function buildRecord(model, slotIndex, stats, hostPlayer)
 		FireRate = stats.FireRate,
 		Range = CombatRange.GetDefenseEngageRange(stats.Range),
 		Accuracy = stats.Accuracy,
+		Spread = stats.Spread or 0.2,
 		CritChance = stats.CritChance,
 		CritDamage = stats.CritDamage,
 		BotDamageMult = stats.BotDamageMult,
@@ -86,27 +87,43 @@ function BotService.StartBotAI(bot)
 			speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
 			local now = os.clock()
 			local fireCd = (bot.FireRate or 0.3) / math.max(1, speedMult)
-			if now - (bot.LastFire or 0) < fireCd then
-				continue
-			end
 			local standPos = bot.Root.Position
 			local range = bot.Range or 200
-			local target = EnemyService.PickRandomEnemy and EnemyService.PickRandomEnemy(standPos, range, bot.LockedTarget)
+			local teammates = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+			local target = EnemyService.PickTargetForDefender
+					and EnemyService.PickTargetForDefender(standPos, range, bot.LockedTarget, teammates, bot)
 				or EnemyService.FindNearestEnemy(standPos, range)
 			if not target or not target.Root then
 				bot.LockedTarget = nil
+				if CharacterRigBuilder.ClearAimPose then
+					CharacterRigBuilder.ClearAimPose(bot.Model)
+				end
 				continue
 			end
 			bot.LockedTarget = target
-			bot.LastFire = now
-			local aim = target.Root.Position + Vector3.new(0, 1, 0)
+			-- Стабильный aim в торс цели (не дёргать каждый тик на случайную точку)
+			local aim = target.Root.Position + Vector3.new(0, 1.1, 0)
 			local look = Vector3.new(aim.X - standPos.X, 0, aim.Z - standPos.Z)
 			if look.Magnitude > 0.1 then
 				CharacterRigBuilder.FaceInPlace(bot.Model, CFrame.lookAt(standPos, standPos + look.Unit))
 			end
-			local origin = bot.Root.Position + Vector3.new(0, 1.5, 0)
+			-- Рука с оружием наготове, пока есть цель
 			CharacterRigBuilder.PlayFireAnimation(bot.Model, aim)
-			if AccuracyHelper.RollHit(bot.Accuracy) then
+			if now - (bot.LastFire or 0) < fireCd then
+				continue
+			end
+			bot.LastFire = now
+			local origin = CombatVFX.GetMuzzleWorldPosition(bot.Model) or (bot.Root.Position + Vector3.new(0, 1.2, 0))
+			local distance = (aim - origin).Magnitude
+			local hit = AccuracyHelper.RollShot({
+				baseAccuracy = bot.Accuracy,
+				distance = distance,
+				maxRange = range,
+				spread = bot.Spread or 0.2,
+				movingShooter = false,
+				movingTarget = target.State == "Moving",
+			})
+			if hit then
 				CombatVFX.PlayMuzzle(origin, aim)
 				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
 				if math.random() < (bot.CritChance or 0) then

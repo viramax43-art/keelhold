@@ -2,15 +2,37 @@
 	CharacterRigBuilder
 	Creates humanoid R15 NPCs with distinct ally/enemy outfits.
 	Stationary defenders keep only HumanoidRootPart anchored; standard Motor6D
-	joints stay intact. Fire poses use shoulder C0, never detach body parts.
+	joints stay intact. Aim pose: right arm chain Anchored + Heartbeat CFrame.
 ]]
 
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 local WeaponBuilder = require(script.Parent.WeaponBuilder)
 
 local CharacterRigBuilder = {}
 local r15Template: Model? = nil
+local fireBaseC0: { [Motor6D]: CFrame } = {}
+setmetatable(fireBaseC0, { __mode = "k" })
+
+-- Активные прицелы: каждый кадр ставим CFrame руки (реплицируется на клиент)
+local activeAims: { [Model]: Vector3 } = {}
+local aimHeartbeat: RBXScriptConnection? = nil
+
+local function stripRuntimeAnimation(model: Model)
+	local animate = model:FindFirstChild("Animate")
+	if animate then
+		animate:Destroy()
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if animator then
+		animator:Destroy()
+	end
+end
 
 local ALLY_STYLES = {
 	{
@@ -331,11 +353,7 @@ function CharacterRigBuilder.CreateNPC(opts)
 	humanoid.JumpPower = 0
 	humanoid.AutoRotate = false
 
-	-- Убираем Animator, иначе поза руки при стрельбе сбрасывается
-	local animator = humanoid:FindFirstChildOfClass("Animator")
-	if animator then
-		animator:Destroy()
-	end
+	stripRuntimeAnimation(model)
 
 	applyBodyStyle(model, style)
 	addTacticalOutfit(model, style, team)
@@ -397,6 +415,7 @@ function CharacterRigBuilder.LockStanding(model: Model, facingCF: CFrame?)
 		humanoid.AutoRotate = false
 		humanoid.PlatformStand = false
 	end
+	stripRuntimeAnimation(model)
 	model:SetAttribute("PoseLocked", true)
 end
 
@@ -448,13 +467,14 @@ function CharacterRigBuilder.AttachWeapon(model: Model, weaponType: string, tier
 		end
 	end
 
-	-- WeaponBuilder barrels point along local -Z. The grip maps that axis to
-	-- the arm's -Y axis; raising the shoulder then maps both to world forward.
+	-- Оружие: Handle +Y = рукоять вверх, -Z = ствол вперёд.
+	-- В ладони R15: лёгкий вынос вперёд и разворот ствола от корпуса.
 	local gripOffset
 	if hand.Name == "Right Arm" then
-		gripOffset = CFrame.new(0, -0.72, -0.28) * CFrame.Angles(math.rad(-90), 0, 0)
+		gripOffset = CFrame.new(0, -1.05, -0.15) * CFrame.Angles(math.rad(-90), math.rad(0), math.rad(-5))
 	else
-		gripOffset = CFrame.new(0, -0.12, -0.3) * CFrame.Angles(math.rad(-90), 0, 0)
+		-- RightHand / R15
+		gripOffset = CFrame.new(0.05, -0.2, -0.12) * CFrame.Angles(math.rad(-85), math.rad(15), math.rad(95))
 	end
 	handle.CFrame = hand.CFrame * gripOffset
 	weldTo(hand, handle)
@@ -463,23 +483,249 @@ function CharacterRigBuilder.AttachWeapon(model: Model, weaponType: string, tier
 end
 
 local function findShoulder(model: Model): Motor6D?
-	local torso = model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
-	if not torso then
-		return nil
-	end
-	local shoulder = torso:FindFirstChild("RightShoulder") or torso:FindFirstChild("Right Shoulder")
-	if shoulder and shoulder:IsA("Motor6D") then
-		return shoulder
-	end
-	for _, descendant in ipairs(torso:GetDescendants()) do
-		if descendant:IsA("Motor6D") and descendant.Part1 then
-			local name = descendant.Part1.Name
-			if name == "RightUpperArm" or name == "Right Arm" then
-				return descendant
+	for _, inst in ipairs(model:GetDescendants()) do
+		if inst:IsA("Motor6D") and inst.Part1 then
+			local n = inst.Part1.Name
+			if n == "RightUpperArm" or n == "Right Arm" then
+				return inst
 			end
 		end
 	end
 	return nil
+end
+
+local function findElbow(model: Model): Motor6D?
+	for _, inst in ipairs(model:GetDescendants()) do
+		if inst:IsA("Motor6D") and inst.Part1 and inst.Part1.Name == "RightLowerArm" then
+			return inst
+		end
+	end
+	return nil
+end
+
+local function findWrist(model: Model): Motor6D?
+	for _, inst in ipairs(model:GetDescendants()) do
+		if inst:IsA("Motor6D") and inst.Part1 and inst.Part1.Name == "RightHand" then
+			return inst
+		end
+	end
+	return nil
+end
+
+local function aimPartCFrame(position: Vector3, dir: Vector3): CFrame
+	-- Ось -Y кости направлена вдоль dir (к кисти / к цели)
+	return CFrame.lookAt(position, position + dir) * CFrame.Angles(math.rad(90), 0, 0)
+end
+
+local function gripOffsetFor(hand: BasePart): CFrame
+	if hand.Name == "Right Arm" then
+		return CFrame.new(0, -1.05, -0.15) * CFrame.Angles(math.rad(-90), 0, math.rad(-5))
+	end
+	return CFrame.new(0.05, -0.2, -0.12) * CFrame.Angles(math.rad(-85), math.rad(15), math.rad(95))
+end
+
+local function isLongGun(weaponType: string?): boolean
+	return weaponType == "Rifle"
+		or weaponType == "LMG"
+		or weaponType == "Sniper"
+		or weaponType == "Shotgun"
+		or weaponType == "SMG"
+		or weaponType == "Crossbow"
+end
+
+local function gunAimCFrame(gunPos: Vector3, aimDir: Vector3, upHint: Vector3, longGun: boolean): CFrame
+	local up = upHint
+	if math.abs(aimDir:Dot(up)) > 0.92 then
+		up = Vector3.xAxis
+	end
+	-- lookAt: -Z = ствол к цели, Y ≈ вверх (рукоять)
+	local cf = CFrame.lookAt(gunPos, gunPos + aimDir, up)
+	if longGun then
+		return cf * CFrame.Angles(math.rad(-4), 0, math.rad(-2))
+	end
+	return cf * CFrame.Angles(math.rad(-12), math.rad(3), math.rad(-6))
+end
+
+local function disableArmMotors(model: Model)
+	local shoulder = findShoulder(model)
+	local elbow = findElbow(model)
+	local wrist = findWrist(model)
+	for _, motor in ipairs({ shoulder, elbow, wrist }) do
+		if motor then
+			if not fireBaseC0[motor] then
+				fireBaseC0[motor] = motor.C0
+			end
+			motor.Enabled = false
+			pcall(function()
+				motor.Transform = CFrame.new()
+			end)
+		end
+	end
+end
+
+local function applyAnchoredAim(model: Model, aim: Vector3)
+	if not model.Parent then
+		return
+	end
+	local root = getRoot(model)
+	local torso = model:FindFirstChild("UpperTorso") or model:FindFirstChild("Torso")
+	local upper = model:FindFirstChild("RightUpperArm") or model:FindFirstChild("Right Arm")
+	if not root or not torso or not torso:IsA("BasePart") or not upper or not upper:IsA("BasePart") then
+		return
+	end
+
+	stripRuntimeAnimation(model)
+	disableArmMotors(model)
+
+	local lower = model:FindFirstChild("RightLowerArm")
+	local hand = model:FindFirstChild("RightHand")
+	local right = root.CFrame.RightVector
+	local shoulder = (torso.CFrame * CFrame.new(1.0, 0.45, -0.05)).Position
+
+	local toAim = aim - shoulder
+	if toAim.Magnitude < 0.08 then
+		toAim = root.CFrame.LookVector
+	else
+		toAim = toAim.Unit
+	end
+	local aimDir = Vector3.new(toAim.X, math.clamp(toAim.Y, -0.28, 0.38), toAim.Z)
+	if aimDir.Magnitude < 0.05 then
+		aimDir = root.CFrame.LookVector
+	else
+		aimDir = aimDir.Unit
+	end
+
+	local longGun = isLongGun(model:GetAttribute("WeaponType"))
+	local extend = if longGun then 1.2 else 0.92
+	local gunPos = shoulder + aimDir * extend + right * 0.18 + Vector3.new(0, if longGun then 0.05 else 0.12, 0)
+	local gunCF = gunAimCFrame(gunPos, aimDir, Vector3.yAxis, longGun)
+
+	local weapon = model:FindFirstChild("WeaponVisual")
+	local handle = weapon and weapon:IsA("Model") and weapon.PrimaryPart
+
+	local handPos = gunPos - aimDir * 0.08 + Vector3.new(0, -0.04, 0)
+	local upperLen = upper.Size.Y * 0.92
+	local lowerLen = if lower and lower:IsA("BasePart") then lower.Size.Y * 0.92 else upperLen * 0.85
+
+	local target = handPos
+	local delta = target - shoulder
+	local dist = delta.Magnitude
+	local maxReach = upperLen + lowerLen - 0.08
+	local minReach = math.abs(upperLen - lowerLen) + 0.1
+	if dist > maxReach then
+		target = shoulder + delta.Unit * maxReach
+		dist = maxReach
+	elseif dist < minReach then
+		target = shoulder + delta.Unit * minReach
+		dist = minReach
+	end
+
+	local toTarget = (target - shoulder).Unit
+	local along = (dist * dist + upperLen * upperLen - lowerLen * lowerLen) / (2 * dist)
+	along = math.clamp(along, 0, upperLen)
+	local height = math.sqrt(math.max(0, upperLen * upperLen - along * along))
+
+	local bendAxis = toTarget:Cross(right * 0.65 + Vector3.yAxis * 0.35)
+	if bendAxis.Magnitude < 0.12 then
+		bendAxis = toTarget:Cross(Vector3.yAxis)
+	end
+	if bendAxis.Magnitude < 0.12 then
+		bendAxis = right
+	end
+	bendAxis = bendAxis.Unit
+	local elbowPos = shoulder + toTarget * along - bendAxis * math.max(height, upperLen * 0.28)
+
+	upper.Anchored = true
+	upper.CanCollide = false
+	upper.CFrame = aimPartCFrame((shoulder + elbowPos) * 0.5, (elbowPos - shoulder).Unit)
+
+	if lower and lower:IsA("BasePart") then
+		lower.Anchored = true
+		lower.CanCollide = false
+		lower.CFrame = aimPartCFrame((elbowPos + target) * 0.5, (target - elbowPos).Unit)
+	end
+
+	if hand and hand:IsA("BasePart") then
+		hand.Anchored = true
+		hand.CanCollide = false
+		hand.CFrame = CFrame.lookAt(target, target + aimDir, gunCF.UpVector) * CFrame.Angles(math.rad(90), math.rad(15), 0)
+	elseif upper.Name == "Right Arm" then
+		upper.CFrame = aimPartCFrame((shoulder + target) * 0.5, (target - shoulder).Unit)
+	end
+
+	if handle and handle:IsA("BasePart") then
+		handle.Anchored = true
+		handle.CanCollide = false
+		handle.CFrame = gunCF
+		for _, d in ipairs(weapon:GetDescendants()) do
+			if d:IsA("BasePart") and d ~= handle then
+				d.Anchored = false
+				d.CanCollide = false
+			end
+		end
+	end
+end
+
+local function ensureAimHeartbeat()
+	if aimHeartbeat then
+		return
+	end
+	aimHeartbeat = RunService.Heartbeat:Connect(function()
+		for model, aim in pairs(activeAims) do
+			if not model.Parent then
+				activeAims[model] = nil
+			else
+				applyAnchoredAim(model, aim)
+			end
+		end
+	end)
+end
+
+function CharacterRigBuilder.ClearAimPose(model: Model)
+	if not model then
+		return
+	end
+	activeAims[model] = nil
+	model:SetAttribute("CombatAiming", false)
+
+	local upper = model:FindFirstChild("RightUpperArm") or model:FindFirstChild("Right Arm")
+	local lower = model:FindFirstChild("RightLowerArm")
+	local hand = model:FindFirstChild("RightHand")
+	for _, p in ipairs({ upper, lower, hand }) do
+		if p and p:IsA("BasePart") then
+			p.Anchored = false
+		end
+	end
+
+	local function restoreMotor(motor: Motor6D?)
+		if not motor then
+			return
+		end
+		motor.Enabled = true
+		if fireBaseC0[motor] then
+			motor.C0 = fireBaseC0[motor]
+		end
+		pcall(function()
+			motor.Transform = CFrame.new()
+		end)
+	end
+	restoreMotor(findShoulder(model))
+	restoreMotor(findElbow(model))
+	restoreMotor(findWrist(model))
+
+	local grip = findGripPart(model)
+	local weapon = model:FindFirstChild("WeaponVisual")
+	local handle = weapon and weapon:IsA("Model") and weapon.PrimaryPart
+	if grip and handle and handle:IsA("BasePart") then
+		handle.Anchored = false
+		for _, d in ipairs(weapon:GetDescendants()) do
+			if d:IsA("WeldConstraint") or d:IsA("Weld") then
+				d:Destroy()
+			end
+		end
+		handle.CFrame = grip.CFrame * gripOffsetFor(grip)
+		weldTo(grip, handle)
+	end
 end
 
 function CharacterRigBuilder.PlayFireAnimation(model: Model, aimPos: Vector3?)
@@ -487,52 +733,32 @@ function CharacterRigBuilder.PlayFireAnimation(model: Model, aimPos: Vector3?)
 		return
 	end
 	local root = getRoot(model)
-	local shoulder = findShoulder(model)
-	if not root or not shoulder then
+	if not root then
 		return
 	end
-
-	-- Animator перезаписывает Transform каждый кадр — у NPC отключаем
-	local humanoid = model:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		local animator = humanoid:FindFirstChildOfClass("Animator")
-		if animator then
-			animator:Destroy()
-		end
-	end
-
-	local baseC0 = shoulder:GetAttribute("FireBaseC0")
-	if typeof(baseC0) ~= "CFrame" then
-		baseC0 = shoulder.C0
-		shoulder:SetAttribute("FireBaseC0", baseC0)
-	end
-
 	local aim = if typeof(aimPos) == "Vector3"
 		then aimPos
 		else (root.CFrame * CFrame.new(0, 1.5, -30)).Position
-	local shoulderPosition = (root.CFrame * CFrame.new(1.05, 1.25, 0)).Position
-	local toAim = aim - shoulderPosition
-	if toAim.Magnitude < 0.05 then
-		toAim = -root.CFrame.LookVector
+
+	-- Якорный прицел только у стоячих защитников (у бегущих врагов рука оторвётся от тела)
+	local isDefender = model:GetAttribute("IsBot") == true
+		or model:GetAttribute("PoseLocked") == true
+		or model:GetAttribute("TeamRole") == "Ally"
+	if not isDefender then
+		return
 	end
-	local localDirection = root.CFrame:VectorToObjectSpace(toAim.Unit)
-	local pitch = math.atan2(localDirection.Y, math.max(0.01, -localDirection.Z))
-	local raise = math.rad(88) + pitch
+
+	stripRuntimeAnimation(model)
+	activeAims[model] = aim
+	model:SetAttribute("CombatAiming", true)
+	ensureAimHeartbeat()
+	applyAnchoredAim(model, aim)
 
 	local token = (model:GetAttribute("FireAnimToken") or 0) + 1
 	model:SetAttribute("FireAnimToken", token)
-	local raiseCF = CFrame.Angles(raise, 0, math.rad(4))
-	shoulder.C0 = baseC0 * raiseCF
-	pcall(function()
-		shoulder.Transform = raiseCF
-	end)
-
-	task.delay(0.32, function()
-		if model.Parent and model:GetAttribute("FireAnimToken") == token and shoulder.Parent then
-			shoulder.C0 = baseC0
-			pcall(function()
-				shoulder.Transform = CFrame.new()
-			end)
+	task.delay(2.0, function()
+		if model.Parent and model:GetAttribute("FireAnimToken") == token and activeAims[model] then
+			CharacterRigBuilder.ClearAimPose(model)
 		end
 	end)
 end

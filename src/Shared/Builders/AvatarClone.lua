@@ -83,6 +83,14 @@ function AvatarClone.Create(hostPlayer: Player, slotIndex: number, facingCF: CFr
 	-- Parent before PivotTo so accessories finish attaching in their proper positions.
 	model.Parent = squad
 	model:PivotTo(facingCF)
+	local animate = model:FindFirstChild("Animate")
+	if animate then
+		animate:Destroy()
+	end
+	local animator = humanoid:FindFirstChildOfClass("Animator")
+	if animator then
+		animator:Destroy()
+	end
 	CharacterRigBuilder.AddTeamOutfit(model, "Ally", slotIndex)
 	CharacterRigBuilder.AttachWeapon(model, stats.WeaponType or "Rifle", stats.WeaponTier or stats.Tier)
 	CharacterRigBuilder.LockStanding(model, nil)

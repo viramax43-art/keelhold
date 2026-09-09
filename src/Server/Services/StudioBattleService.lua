@@ -18,19 +18,20 @@ function StudioBattleService.CanUseLocalBattle(): boolean
 end
 
 function StudioBattleService.HoverSpawn(player: Player)
-	local folder = workspace:FindFirstChild("MapPoints")
-	local spawn = folder and folder:FindFirstChild("DefenseSpawn1")
+	MapBind.EnsureBattlePoints()
+	local stand = MapBind.GetSpectatorStandCFrame()
 	local char = player.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	if hrp and spawn and spawn:IsA("BasePart") then
-		-- Teleport only. Flight is client-controlled — do NOT Anchor/PlatformStand.
+	if hrp and stand then
 		hrp.Anchored = false
-		hrp.CFrame = spawn.CFrame + Vector3.new(0, 14, -10)
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+		hrp.CFrame = stand
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
 			hum.PlatformStand = false
 		end
-		Log.Write("StudioBattle", "Hover spawn " .. player.Name)
+		Log.Write("StudioBattle", "Bridge stand spawn " .. player.Name)
 	end
 end
 

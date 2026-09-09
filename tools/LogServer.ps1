@@ -1,4 +1,5 @@
-# LogServer.ps1 — TCP: логи + сохранение профилей Studio (persist без DataStore API)
+# LogServer.ps1 — TCP: logs + profile DB (concurrent clients, timeouts)
+# Roblox Studio HttpService -> 127.0.0.1:8765
 
 param(
     [int]$Port = 8765
@@ -9,6 +10,8 @@ $LogDir = Join-Path $ProjectRoot "logs"
 $LogFile = Join-Path $LogDir "game.log"
 $ProfileDir = Join-Path $LogDir "profiles"
 $StudioProfilesLua = Join-Path $ProjectRoot "src\Server\Data\StudioProfiles.lua"
+$SaveMarker = "__BD_PROFILE_SAVE__"
+$MetaMarker = "__BD_PROFILE_META__"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
@@ -19,6 +22,9 @@ if (-not (Test-Path $LogFile)) {
 } else {
     Add-Content -Path $LogFile -Value "`n--- LogServer restarted $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ---" -Encoding UTF8
 }
+
+$script:ProfileLock = New-Object System.Object
+$script:ModuleDirty = $false
 
 function Get-ProfileProgress {
     param($Obj)
@@ -58,12 +64,115 @@ function Write-StudioProfilesModule {
     [System.IO.File]::WriteAllText($StudioProfilesLua, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
 }
 
+function Save-ProfileJson {
+    param(
+        [string]$UserId,
+        [string]$Json,
+        [switch]$Force
+    )
+    if ($UserId -notmatch '^\d+$' -or -not $Json) { return $false }
+    $incoming = $null
+    try { $incoming = $Json | ConvertFrom-Json } catch { return $false }
+    if (-not $incoming) { return $false }
+
+    $saved = $false
+    [System.Threading.Monitor]::Enter($script:ProfileLock)
+    try {
+        $file = Join-Path $ProfileDir "$UserId.json"
+        $existing = $null
+        if (Test-Path $file) {
+            try { $existing = Get-Content -Path $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $existing = $null }
+        }
+        if (-not $Force -and (Test-IsStaleProfile -Incoming $incoming -Existing $existing)) {
+            # тихо: старые батчи из очереди HttpService — норма
+            return $false
+        }
+        [System.IO.File]::WriteAllText($file, $Json, [System.Text.UTF8Encoding]::new($false))
+        $script:ModuleDirty = $true
+        $saved = $true
+        Write-Host ("Saved profile {0} Gold={1} TotalXP={2}" -f $UserId, $incoming.Gold, $incoming.TotalXP) -ForegroundColor Green
+    } finally {
+        [System.Threading.Monitor]::Exit($script:ProfileLock)
+    }
+    return $saved
+}
+
+function Patch-ProfileMeta {
+    param(
+        [string]$UserId,
+        [int]$Gold,
+        [int]$Xp,
+        [int]$TotalXp,
+        [int]$Wave
+    )
+    if ($UserId -notmatch '^\d+$') { return }
+    [System.Threading.Monitor]::Enter($script:ProfileLock)
+    try {
+        $file = Join-Path $ProfileDir "$UserId.json"
+        $obj = $null
+        if (Test-Path $file) {
+            try { $obj = Get-Content -Path $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $obj = $null }
+        }
+        if ($obj) {
+            $exXp = 0
+            try { $exXp = [int]$obj.TotalXP } catch {}
+            if ($TotalXp -lt $exXp) {
+                return
+            }
+            $obj.Gold = $Gold
+            $obj.XP = $Xp
+            $obj.TotalXP = $TotalXp
+            $obj.HighestWave = $Wave
+        } else {
+            $obj = [pscustomobject]@{ Gold = $Gold; XP = $Xp; TotalXP = $TotalXp; HighestWave = $Wave; Level = 1 }
+        }
+        $json = $obj | ConvertTo-Json -Compress -Depth 20
+        [System.IO.File]::WriteAllText($file, $json, [System.Text.UTF8Encoding]::new($false))
+        $script:ModuleDirty = $true
+        Write-Host ("Patched Gold/XP userId={0} Gold={1} TotalXP={2}" -f $UserId, $Gold, $TotalXp) -ForegroundColor Green
+    } finally {
+        [System.Threading.Monitor]::Exit($script:ProfileLock)
+    }
+}
+
+function Process-LogBodyForProfiles {
+    param([string]$Body)
+    if (-not $Body) { return }
+    foreach ($line in ($Body -split "`n")) {
+        if ($line.Contains($SaveMarker)) {
+            $idx = $line.IndexOf($SaveMarker)
+            $payload = $line.Substring($idx + $SaveMarker.Length)
+            if ($payload.StartsWith("|")) { $payload = $payload.Substring(1) }
+            $pipe = $payload.IndexOf("|")
+            if ($pipe -lt 1) { continue }
+            $userId = $payload.Substring(0, $pipe).Trim()
+            $json = $payload.Substring($pipe + 1).Trim()
+            if ($json.StartsWith("{") -and $json.EndsWith("}")) {
+                [void](Save-ProfileJson -UserId $userId -Json $json)
+            }
+        } elseif ($line.Contains($MetaMarker)) {
+            $idx = $line.IndexOf($MetaMarker)
+            $payload = $line.Substring($idx + $MetaMarker.Length)
+            if ($payload.StartsWith("|")) { $payload = $payload.Substring(1) }
+            $parts = $payload.Split("|")
+            if ($parts.Count -lt 5) { continue }
+            $userId = $parts[0].Trim()
+            $gold = 0; $xp = 0; $totalXp = 0; $wave = 0
+            [void][int]::TryParse($parts[1], [ref]$gold)
+            [void][int]::TryParse($parts[2], [ref]$xp)
+            [void][int]::TryParse($parts[3], [ref]$totalXp)
+            [void][int]::TryParse($parts[4], [ref]$wave)
+            Patch-ProfileMeta -UserId $userId -Gold $gold -Xp $xp -TotalXp $totalXp -Wave $wave
+        }
+    }
+}
+
 function Read-RequestBody {
     param([System.IO.StreamReader]$Reader)
 
     $headers = @{}
     $line = $Reader.ReadLine()
-    while ($line -and $line.Length -gt 0) {
+    while ($null -ne $line -and $line.Length -gt 0) {
         $idx = $line.IndexOf(":")
         if ($idx -gt 0) {
             $name = $line.Substring(0, $idx).Trim().ToLower()
@@ -77,10 +186,7 @@ function Read-RequestBody {
     if ($headers.ContainsKey("content-length")) {
         [void][int]::TryParse($headers["content-length"], [ref]$contentLength)
     }
-
-    if ($contentLength -le 0) {
-        return ""
-    }
+    if ($contentLength -le 0) { return "" }
 
     $buffer = New-Object char[] $contentLength
     $read = 0
@@ -89,7 +195,7 @@ function Read-RequestBody {
         if ($n -le 0) { break }
         $read += $n
     }
-    return -join $buffer
+    return -join $buffer[0..([Math]::Max(0, $read - 1))]
 }
 
 function Send-HttpResponse {
@@ -122,11 +228,74 @@ function Get-SafeUserId {
     return $null
 }
 
-# Seed StudioProfiles from existing json
+function Handle-Client {
+    param([System.Net.Sockets.TcpClient]$Client)
+
+    try {
+        $Client.ReceiveTimeout = 2500
+        $Client.SendTimeout = 2500
+        $stream = $Client.GetStream()
+        $stream.ReadTimeout = 2500
+        $stream.WriteTimeout = 2500
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $false, 8192, $true)
+
+        $requestLine = $reader.ReadLine()
+        if (-not $requestLine) {
+            return
+        }
+
+        $parts = $requestLine.Split(" ")
+        $method = $parts[0]
+        $path = if ($parts.Length -gt 1) { $parts[1] } else { "/" }
+
+        if ($method -eq "POST" -and ($path -eq "/log" -or $path -eq "/")) {
+            $body = Read-RequestBody -Reader $reader
+            if ($body -and $body.Trim().Length -gt 0) {
+                try { Add-Content -Path $LogFile -Value $body -Encoding UTF8 } catch {}
+                Process-LogBodyForProfiles -Body $body
+            }
+            Send-HttpResponse -Client $Client -StatusCode 200 -Body "ok"
+        }
+        elseif ($method -eq "GET" -and $path -match '^/profile/(\d+)$') {
+            $userId = Get-SafeUserId $Matches[1]
+            $file = Join-Path $ProfileDir "$userId.json"
+            if ($userId -and (Test-Path $file)) {
+                $json = [System.IO.File]::ReadAllText($file)
+                Send-HttpResponse -Client $Client -StatusCode 200 -ContentType "application/json" -Body $json
+            } else {
+                Send-HttpResponse -Client $Client -StatusCode 404 -Body "missing"
+            }
+        }
+        elseif ($method -eq "POST" -and $path -match '^/profile/(\d+)') {
+            $userId = Get-SafeUserId $Matches[1]
+            $force = $path -match '[?&]force=1'
+            $body = Read-RequestBody -Reader $reader
+            if (-not $userId -or -not $body) {
+                Send-HttpResponse -Client $Client -StatusCode 400 -Body "bad"
+            } else {
+                $ok = Save-ProfileJson -UserId $userId -Json $body -Force:$force
+                Send-HttpResponse -Client $Client -StatusCode 200 -Body $(if ($ok) { "saved" } else { "skipped-stale" })
+            }
+        }
+        else {
+            Send-HttpResponse -Client $Client -StatusCode 404 -Body "not found"
+        }
+    } catch {
+        $msg = [string]$_.Exception.Message
+        # Roblox often aborts HttpService mid-read — ignore noisy transport errors
+        if ($msg -notmatch 'Read|transport|connection|timeout|Timeout|aborted|forcibly|responding') {
+            Write-Host "LogServer client error: $msg" -ForegroundColor Red
+        }
+    } finally {
+        try { $Client.Close() } catch {}
+    }
+}
+
 Write-StudioProfilesModule
 
 try {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    $listener.Server.ReceiveTimeout = 0
     $listener.Start()
 } catch {
     Write-Host "LogServer: cannot bind port $Port" -ForegroundColor Red
@@ -139,77 +308,23 @@ Write-Host "Writing logs to: $LogFile" -ForegroundColor Cyan
 Write-Host "Profiles dir: $ProfileDir" -ForegroundColor Cyan
 Write-Host "StudioProfiles: $StudioProfilesLua" -ForegroundColor Cyan
 
+$lastModuleWrite = Get-Date
 while ($true) {
-    $client = $null
     try {
-        $client = $listener.AcceptTcpClient()
-        $stream = $client.GetStream()
-        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $false, 8192, $true)
-
-        $requestLine = $reader.ReadLine()
-        if (-not $requestLine) {
-            Send-HttpResponse -Client $client -StatusCode 404 -Body "empty"
-            continue
-        }
-
-        $parts = $requestLine.Split(" ")
-        $method = $parts[0]
-        $path = if ($parts.Length -gt 1) { $parts[1] } else { "/" }
-
-        if ($method -eq "POST" -and ($path -eq "/log" -or $path -eq "/")) {
-            $body = Read-RequestBody -Reader $reader
-            if ($body -and $body.Trim().Length -gt 0) {
-                Add-Content -Path $LogFile -Value $body -Encoding UTF8
+        if ($listener.Pending()) {
+            $client = $listener.AcceptTcpClient()
+            Handle-Client -Client $client
+        } else {
+            # StudioProfiles.lua — не на каждый POST (тормозило Accept и роняло сейвы)
+            if ($script:ModuleDirty -and ((Get-Date) - $lastModuleWrite).TotalSeconds -ge 1.5) {
+                $script:ModuleDirty = $false
+                $lastModuleWrite = Get-Date
+                try { Write-StudioProfilesModule } catch {}
             }
-            Send-HttpResponse -Client $client -StatusCode 200 -Body "ok"
-        }
-        elseif ($method -eq "GET" -and $path -match '^/profile/(\d+)$') {
-            $userId = Get-SafeUserId $Matches[1]
-            $file = Join-Path $ProfileDir "$userId.json"
-            if ($userId -and (Test-Path $file)) {
-                $json = Get-Content -Path $file -Raw -Encoding UTF8
-                Send-HttpResponse -Client $client -StatusCode 200 -ContentType "application/json" -Body $json
-            } else {
-                Send-HttpResponse -Client $client -StatusCode 404 -Body "missing"
-            }
-        }
-        elseif ($method -eq "POST" -and $path -match '^/profile/(\d+)') {
-            $userId = Get-SafeUserId $Matches[1]
-            $force = $path -match '[?&]force=1'
-            $body = Read-RequestBody -Reader $reader
-            if (-not $userId -or -not $body) {
-                Send-HttpResponse -Client $client -StatusCode 400 -Body "bad"
-            } else {
-                $file = Join-Path $ProfileDir "$userId.json"
-                $incoming = $null
-                try { $incoming = $body | ConvertFrom-Json } catch { $incoming = $null }
-                if (-not $incoming) {
-                    Send-HttpResponse -Client $client -StatusCode 400 -Body "bad json"
-                } else {
-                    $existing = $null
-                    if (Test-Path $file) {
-                        try { $existing = Get-Content -Path $file -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $existing = $null }
-                    }
-                    if (-not $force -and (Test-IsStaleProfile -Incoming $incoming -Existing $existing)) {
-                        Write-Host ("Skip stale profile {0} (inXP={1} diskXP={2})" -f $userId, $incoming.TotalXP, $existing.TotalXP) -ForegroundColor Yellow
-                        Send-HttpResponse -Client $client -StatusCode 200 -Body "skipped-stale"
-                    } else {
-                        [System.IO.File]::WriteAllText($file, $body, [System.Text.UTF8Encoding]::new($false))
-                        Write-StudioProfilesModule
-                        Write-Host ("Saved profile {0} ({1} bytes) Gold={2} TotalXP={3}" -f $userId, $body.Length, $incoming.Gold, $incoming.TotalXP) -ForegroundColor Green
-                        Send-HttpResponse -Client $client -StatusCode 200 -Body "saved"
-                    }
-                }
-            }
-        }
-        else {
-            Send-HttpResponse -Client $client -StatusCode 404 -Body "not found"
+            Start-Sleep -Milliseconds 10
         }
     } catch {
-        Write-Host "LogServer error: $($_.Exception.Message)" -ForegroundColor Red
-    } finally {
-        if ($client) {
-            $client.Close()
-        }
+        Write-Host "LogServer accept error: $($_.Exception.Message)" -ForegroundColor Red
+        Start-Sleep -Milliseconds 50
     }
 }

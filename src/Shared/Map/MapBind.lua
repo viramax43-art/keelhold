@@ -616,6 +616,18 @@ function MapBind.GetDefenseLook(): Vector3
 	return defenseLook
 end
 
+-- Точка стояния зрителя на мосту (чуть позади линии обороны, на настиле)
+function MapBind.GetSpectatorStandCFrame(): CFrame?
+	local folder = workspace:FindFirstChild("MapPoints")
+	local spawn = folder and folder:FindFirstChild("DefenseSpawn1")
+	if not (spawn and spawn:IsA("BasePart")) then
+		return nil
+	end
+	-- DefenseSpawn уже на высоте HRP; смещение только вдоль моста (от врагов), без world Z/Y хаков
+	local pos = MapBind.OffsetOnBridge(spawn.Position, -4, 0)
+	return MapBind.GetDefenseCFrame(pos)
+end
+
 local battlePointsReady = false
 
 -- Повторный BindBattlePoints на каждый бой — тяжёлый GetDescendants по мосту (лаги входа).
@@ -651,8 +663,8 @@ function MapBind.BindBattlePoints(): boolean
 
 	local half = (deck.UseX and deck.Span.X or deck.Span.Z) * 0.5
 	local width = deck.UseX and deck.Span.Z or deck.Span.X
-	half = math.max(half, 20)
-	width = math.clamp(width, 12, 52)
+	width = math.clamp(width, 16, 80)
+	half = math.max(half, 24)
 
 	local defenseSign
 	if deck.UseX then
@@ -723,9 +735,11 @@ function MapBind.BindBattlePoints(): boolean
 	workspace:SetAttribute("CommissionAlongZ", defenseLook.Z)
 	workspace:SetAttribute("CommissionLateralX", bridgeLateral.X)
 	workspace:SetAttribute("CommissionLateralZ", bridgeLateral.Z)
-	workspace:SetAttribute("CommissionBridgeHalfWidth", math.max(8, (width or 20) * 0.45))
+	workspace:SetAttribute("CommissionBridgeHalfWidth", math.max(10, (width or 24) * 0.48))
+	workspace:SetAttribute("CommissionBridgeWidth", width or 24)
 
-	local laterals = { -width * 0.32, -width * 0.12, width * 0.12, width * 0.32 }
+	-- Шире разнос обороны по полосам
+	local laterals = { -width * 0.38, -width * 0.14, width * 0.14, width * 0.38 }
 	for i, spawnName in ipairs(names.DefenseSpawns) do
 		setInvisiblePoint(folder, spawnName, along(defenseT, laterals[i] or 0))
 	end
@@ -733,7 +747,7 @@ function MapBind.BindBattlePoints(): boolean
 
 	-- Waypoints: от спавна врагов → почти к линии обороны
 	local wpCount = #names.BridgePathWaypoints
-	local pathEndT = defenseSign * 0.68
+	local pathEndT = defenseSign * 0.70
 	for i, wpName in ipairs(names.BridgePathWaypoints) do
 		local alpha = (i - 1) / math.max(wpCount - 1, 1)
 		local t = enemyT * (1 - alpha) + pathEndT * alpha
