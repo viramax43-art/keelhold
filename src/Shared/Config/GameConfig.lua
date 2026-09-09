@@ -112,7 +112,11 @@ local GameConfig = {
 		EnemySpawnInterval = 0.22,
 		EnemyGroupSize = 4,
 		EnemyGroupGap = 0.75,
-		-- Debug: workspace:SetAttribute("BD_DebugCombat", true) — маркеры промаха
+		-- Временно для диагностики урона (потом выключить)
+		DebugCombatDamage = true,
+		ForceBotHitsForTest = true,
+		ForceEnemyHitsForTest = true,
+		-- Debug VFX: workspace:SetAttribute("BD_DebugCombat", true)
 	},
 
 	-- XP за уровень (экспоненциальный рост через XPPerLevelGrowth)

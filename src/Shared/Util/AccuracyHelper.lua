@@ -53,9 +53,11 @@ function AccuracyHelper.ComputeShotChance(opts: ShotOpts): number
 	return math.clamp(chance, 0.08, 0.96)
 end
 
-function AccuracyHelper.RollShot(opts: ShotOpts): (boolean, number)
+function AccuracyHelper.RollShot(opts: ShotOpts): (boolean, number, number)
 	local chance = AccuracyHelper.ComputeShotChance(opts)
-	return math.random() <= chance, chance
+	local roll = math.random()
+	local hit = roll <= chance
+	return hit, chance, roll
 end
 
 -- Совместимость: простой ролл без дистанции

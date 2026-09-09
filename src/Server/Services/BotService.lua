@@ -19,6 +19,12 @@ local Log = require(ReplicatedStorage.Shared.Util.Log)
 local BotService = {}
 local DataService, WaveService, EnemyService
 
+local function debugCombat(message: string)
+	if GameConfig.Battle and GameConfig.Battle.DebugCombatDamage then
+		Log.Write("Combat", message, "WARN")
+	end
+end
+
 function BotService.GetDefenseCFrame(position: Vector3): CFrame
 	return MapBind.GetDefenseCFrame(position)
 end
@@ -95,32 +101,51 @@ function BotService.StartBotAI(bot)
 				or EnemyService.FindNearestEnemy(standPos, range)
 			if not target or not target.Root then
 				bot.LockedTarget = nil
-				if CharacterRigBuilder.ClearAimPose then
-					CharacterRigBuilder.ClearAimPose(bot.Model)
-				end
+				pcall(function()
+					if CharacterRigBuilder.ClearAimPose then
+						CharacterRigBuilder.ClearAimPose(bot.Model)
+					end
+				end)
 				continue
 			end
 			bot.LockedTarget = target
-			-- Стабильный aim в торс цели (не дёргать каждый тик на случайную точку)
 			local aim = target.Root.Position + Vector3.new(0, 1.1, 0)
 			local look = Vector3.new(aim.X - standPos.X, 0, aim.Z - standPos.Z)
 			if look.Magnitude > 0.1 then
-				CharacterRigBuilder.FaceInPlace(bot.Model, CFrame.lookAt(standPos, standPos + look.Unit))
+				pcall(function()
+					CharacterRigBuilder.FaceInPlace(bot.Model, CFrame.lookAt(standPos, standPos + look.Unit))
+				end)
 			end
-			-- Рука с оружием наготове, пока есть цель
-			CharacterRigBuilder.PlayFireAnimation(bot.Model, aim)
+			pcall(function()
+				CharacterRigBuilder.PlayFireAnimation(bot.Model, aim)
+			end)
 			if now - (bot.LastFire or 0) < fireCd then
 				continue
 			end
 			bot.LastFire = now
+
+			debugCombat(string.format("BOT_SHOT_ATTEMPT bot=%s target=%s", tostring(bot.Id), tostring(target.Id)))
+
 			local origin = CombatVFX.GetMuzzleWorldPosition(bot.Model) or (bot.Root.Position + Vector3.new(0, 1.2, 0))
 			local distance = (aim - origin).Magnitude
-			-- Цель уже выбрана в пределах range от стойки; не обнуляем шанс из‑за смещения дула
 			local shotDistance = math.min(distance, range)
-			local losClear, losPos = CombatVFX.HasClearLos(origin, aim, range, bot.Model, target.Model)
-			local hit = false
+			if distance > range * 1.15 then
+				debugCombat(string.format("BOT_OUT_OF_RANGE bot=%s distance=%.1f range=%.1f", tostring(bot.Id), distance, range))
+			end
+
+			local losClear, losPos = true, aim
+			local losOk, losA, losB = pcall(function()
+				return CombatVFX.HasClearLos(origin, aim, range, bot.Model, target.Model)
+			end)
+			if losOk then
+				losClear, losPos = losA, losB
+			else
+				losClear = true
+			end
+
+			local hit, chance, roll = false, 0, 1
 			if losClear then
-				hit = AccuracyHelper.RollShot({
+				hit, chance, roll = AccuracyHelper.RollShot({
 					baseAccuracy = bot.Accuracy,
 					distance = shotDistance,
 					maxRange = range,
@@ -129,15 +154,61 @@ function BotService.StartBotAI(bot)
 					movingTarget = target.State == "Moving",
 				})
 			end
+			debugCombat(string.format(
+				"BOT_HIT_ROLL bot=%s target=%s distance=%.2f range=%.2f accuracy=%.3f chance=%.3f roll=%.3f los=%s hit=%s",
+				tostring(bot.Id),
+				tostring(target.Id),
+				shotDistance,
+				range,
+				bot.Accuracy or -1,
+				chance,
+				roll,
+				tostring(losClear),
+				tostring(hit)
+			))
+
+			if GameConfig.Battle and GameConfig.Battle.ForceBotHitsForTest then
+				hit = true
+			end
+
 			if hit then
-				CombatVFX.PlayMuzzle(origin, aim, bot.Model, bot.WeaponType)
 				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
 				if math.random() < (bot.CritChance or 0) then
-					damage = damage * math.max(1.5, bot.CritDamage or 1.5)
+					damage *= math.max(1.5, bot.CritDamage or 1.5)
 				end
-				EnemyService.DamageEnemy(target, damage, bot.HostPlayer)
+				local beforeHP = target.CurrentHP
+				local targetId = target.Id or "unknown"
+				debugCombat(string.format(
+					"BOT_DAMAGE_CALL bot=%s target=%s damage=%.2f hpBefore=%.2f",
+					tostring(bot.Id),
+					tostring(targetId),
+					damage,
+					tonumber(beforeHP) or -1
+				))
+				local ok, result = EnemyService.DamageEnemy(target, damage, bot.HostPlayer)
+				if not ok then
+					debugCombat(string.format(
+						"BOT_DAMAGE_FAILED bot=%s target=%s reason=%s",
+						tostring(bot.Id),
+						tostring(targetId),
+						tostring(result)
+					))
+				else
+					debugCombat(string.format(
+						"BOT_DAMAGE_RESULT bot=%s target=%s hpAfter=%.2f applied=%s",
+						tostring(bot.Id),
+						tostring(targetId),
+						tonumber(target.CurrentHP) or -1,
+						tostring(result)
+					))
+				end
+				pcall(function()
+					CombatVFX.PlayMuzzle(origin, aim, bot.Model, bot.WeaponType)
+				end)
 			else
-				CombatVFX.PlayMiss(origin, if losClear then aim else losPos, bot.Model, bot.WeaponType, range)
+				pcall(function()
+					CombatVFX.PlayMiss(origin, if losClear then aim else losPos, bot.Model, bot.WeaponType, range)
+				end)
 			end
 		end
 	end)
@@ -159,17 +230,42 @@ function BotService.HealAllBots()
 end
 
 function BotService.DamageBot(bot, amount: number)
-	if not bot or not bot.Alive then
-		return
+	if not bot then
+		return false, "bot_nil"
 	end
+	if bot.Alive ~= true then
+		return false, "bot_not_alive"
+	end
+
+	local beforeHP = tonumber(bot.CurrentHP) or 0
+	local maxHP = tonumber(bot.MaxHP) or beforeHP
+	if beforeHP <= 0 then
+		return false, "bot_hp_empty"
+	end
+
 	local DamageFormula = require(ReplicatedStorage.Shared.Util.DamageFormula)
-	local mitigated = DamageFormula.Mitigate(amount, bot.Armor)
-	bot.CurrentHP = math.max(0, (bot.CurrentHP or 0) - mitigated)
-	CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, bot.MaxHP)
-	local hum = bot.Model and bot.Model:FindFirstChildOfClass("Humanoid")
-	if hum then
-		hum.Health = bot.CurrentHP
+	local rawDamage = math.max(0, tonumber(amount) or 0)
+	local mitigated = DamageFormula.Mitigate(rawDamage, bot.Armor)
+	local appliedDamage = math.min(beforeHP, math.max(1, mitigated))
+	bot.CurrentHP = math.max(0, beforeHP - appliedDamage)
+
+	if bot.Model and bot.Model.Parent then
+		CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, maxHP)
+		local humanoid = bot.Model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.MaxHealth = maxHP
+			humanoid.Health = bot.CurrentHP
+		end
 	end
+
+	debugCombat(string.format(
+		"BOT_HP_CHANGED id=%s before=%.2f damage=%.2f after=%.2f",
+		tostring(bot.Id),
+		beforeHP,
+		appliedDamage,
+		bot.CurrentHP
+	))
+
 	if bot.CurrentHP <= 0 then
 		bot.Alive = false
 		Log.Write("Wave", "Defender died: " .. tostring(bot.Id))
@@ -180,6 +276,8 @@ function BotService.DamageBot(bot, amount: number)
 			WaveService.OnDefenderDied(bot)
 		end
 	end
+
+	return true, appliedDamage
 end
 
 function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })

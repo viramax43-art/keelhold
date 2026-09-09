@@ -28,9 +28,15 @@ local lastCacheUpdate = 0
 local CACHE_INTERVAL = 0.3
 local cleanupStarted = false
 local attackSlotCount = 0
-local laneAttackCounts = {} -- [lane] = number
+local laneAttackCounts = {}
 local aiConnection: RBXScriptConnection? = nil
 local TURN_SPEED = 12
+
+local function debugCombat(message: string)
+	if GameConfig.Battle and GameConfig.Battle.DebugCombatDamage then
+		Log.Write("Combat", message, "WARN")
+	end
+end
 
 local function getWeaponStats(weaponType: string, wave: number)
 	local maxTier = WeaponsConfig.MaxTier or 5
@@ -426,21 +432,51 @@ function EnemyService.UpdateBotPositionCache()
 end
 
 function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
-	if not enemy or not enemy.Alive then
-		return
+	if not enemy then
+		return false, "enemy_nil"
 	end
-	local mitigated = DamageFormula.Mitigate(amount, enemy.Armor)
-	local appliedDamage = math.min(math.max(enemy.CurrentHP, 0), math.max(mitigated, 0))
-	enemy.CurrentHP -= appliedDamage
-	if enemy.Model then
-		CharacterRigBuilder.UpdateHealthBar(enemy.Model, enemy.CurrentHP, enemy.MaxHP)
+	if enemy.Alive ~= true then
+		return false, "enemy_not_alive"
 	end
+
+	local beforeHP = tonumber(enemy.CurrentHP) or 0
+	local maxHP = tonumber(enemy.MaxHP) or beforeHP
+	if beforeHP <= 0 then
+		return false, "enemy_hp_empty"
+	end
+
+	local rawDamage = math.max(0, tonumber(amount) or 0)
+	local mitigated = DamageFormula.Mitigate(rawDamage, enemy.Armor)
+	local appliedDamage = math.min(beforeHP, math.max(1, mitigated))
+	enemy.CurrentHP = math.max(0, beforeHP - appliedDamage)
+
+	if enemy.Model and enemy.Model.Parent then
+		CharacterRigBuilder.UpdateHealthBar(enemy.Model, enemy.CurrentHP, maxHP)
+		local humanoid = enemy.Model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.MaxHealth = maxHP
+			humanoid.Health = enemy.CurrentHP
+		end
+	end
+
+	debugCombat(string.format(
+		"ENEMY_HP_CHANGED id=%s before=%.2f damage=%.2f after=%.2f",
+		tostring(enemy.Id),
+		beforeHP,
+		appliedDamage,
+		enemy.CurrentHP
+	))
+
 	if enemy.Root then
-		CombatVFX.PlayBlood(enemy.Root.Position + Vector3.new(0, 1, 0), 2.5)
+		pcall(function()
+			CombatVFX.PlayBlood(enemy.Root.Position + Vector3.new(0, 1, 0), 2.5)
+		end)
 	end
+
 	if attacker and RewardService and RewardService.OnEnemyDamaged then
-		RewardService.OnEnemyDamaged(attacker, appliedDamage, enemy.MaxHP or 1)
+		RewardService.OnEnemyDamaged(attacker, appliedDamage, maxHP)
 	end
+
 	if enemy.CurrentHP <= 0 then
 		enemy.Alive = false
 		enemy.State = "Dead"
@@ -457,6 +493,8 @@ function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
 			WaveService.OnEnemyDied()
 		end
 	end
+
+	return true, appliedDamage
 end
 
 function EnemyService.StartCleanupLoop()
@@ -497,7 +535,6 @@ local function tryFire(enemy, now: number, speedMult: number)
 	end
 	fireCd = fireCd / math.max(1, speedMult)
 
-	-- Queued не стреляет; Moving/Attacking — да
 	if enemy.State == "Queued" then
 		return
 	end
@@ -516,26 +553,42 @@ local function tryFire(enemy, now: number, speedMult: number)
 		end
 	end
 	if not best or not best.Root then
+		debugCombat(string.format("ENEMY_NO_TARGET enemy=%s", tostring(enemy.Id)))
 		return
 	end
 
 	enemy.LastFire = now
+	debugCombat(string.format(
+		"ENEMY_SHOT_ATTEMPT enemy=%s target=%s state=%s",
+		tostring(enemy.Id),
+		tostring(best.Id),
+		tostring(enemy.State)
+	))
+
 	local origin = CombatVFX.GetMuzzleWorldPosition(enemy.Model) or (root.Position + Vector3.new(0, 1.2, 0))
 	local aim = best.Root.Position + Vector3.new(0, 1, 0)
-	CharacterRigBuilder.PlayFireAnimation(enemy.Model, aim)
+	pcall(function()
+		CharacterRigBuilder.PlayFireAnimation(enemy.Model, aim)
+	end)
 
-	local losClear, losPos = CombatVFX.HasClearLos(origin, aim, weaponRange, enemy.Model, best.Model)
+	local losClear, losPos = true, aim
+	local losOk, a, b = pcall(function()
+		return CombatVFX.HasClearLos(origin, aim, weaponRange, enemy.Model, best.Model)
+	end)
+	if losOk then
+		losClear, losPos = a, b
+	end
 
-	local hit = false
+	local hit, chance, roll = false, 0, 1
 	if useMelee then
-		hit = true
+		hit, chance, roll = true, 1, 0
 	elseif not losClear then
 		hit = false
 		aim = losPos
+		debugCombat(string.format("ENEMY_OUT_OF_RANGE enemy=%s reason=los_blocked", tostring(enemy.Id)))
 	else
-		-- bestD уже ≤ weaponRange; clamp от смещения дула
 		local shotDistance = math.min(bestD, weaponRange)
-		hit = AccuracyHelper.RollShot({
+		hit, chance, roll = AccuracyHelper.RollShot({
 			baseAccuracy = enemy.Accuracy,
 			distance = shotDistance,
 			maxRange = weaponRange,
@@ -546,11 +599,57 @@ local function tryFire(enemy, now: number, speedMult: number)
 		})
 	end
 
+	debugCombat(string.format(
+		"ENEMY_HIT_ROLL enemy=%s target=%s distance=%.2f range=%.2f accuracy=%.3f chance=%.3f roll=%.3f los=%s hit=%s",
+		tostring(enemy.Id),
+		tostring(best.Id),
+		bestD,
+		weaponRange,
+		enemy.Accuracy or -1,
+		chance,
+		roll,
+		tostring(losClear),
+		tostring(hit)
+	))
+
+	if GameConfig.Battle and GameConfig.Battle.ForceEnemyHitsForTest then
+		hit = true
+	end
+
 	if hit then
-		CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
-		BotService.DamageBot(best, dmg)
+		local targetId = best.Id or "unknown"
+		local beforeHP = best.CurrentHP
+		debugCombat(string.format(
+			"ENEMY_DAMAGE_CALL enemy=%s target=%s damage=%.2f hpBefore=%.2f",
+			tostring(enemy.Id),
+			tostring(targetId),
+			dmg,
+			tonumber(beforeHP) or -1
+		))
+		local ok, result = BotService.DamageBot(best, dmg)
+		if not ok then
+			debugCombat(string.format(
+				"ENEMY_DAMAGE_FAILED enemy=%s target=%s reason=%s",
+				tostring(enemy.Id),
+				tostring(targetId),
+				tostring(result)
+			))
+		else
+			debugCombat(string.format(
+				"ENEMY_DAMAGE_RESULT enemy=%s target=%s hpAfter=%.2f applied=%s",
+				tostring(enemy.Id),
+				tostring(targetId),
+				tonumber(best.CurrentHP) or -1,
+				tostring(result)
+			))
+		end
+		pcall(function()
+			CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
+		end)
 	else
-		CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType, weaponRange)
+		pcall(function()
+			CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType, weaponRange)
+		end)
 	end
 end
 

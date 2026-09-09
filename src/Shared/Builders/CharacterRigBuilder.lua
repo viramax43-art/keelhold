@@ -561,12 +561,18 @@ function CharacterRigBuilder.CreateHealthBar(
 end
 
 function CharacterRigBuilder.UpdateHealthBar(model: Model, hp: number, maxHp: number)
+	if not model then
+		return
+	end
 	local gui = model:FindFirstChild("HealthBar")
 	local background = gui and gui:FindFirstChild("BarBg")
 	local bar = background and background:FindFirstChild("Bar")
-	if bar and bar:IsA("Frame") then
-		bar.Size = UDim2.new(math.clamp(hp / math.max(maxHp, 1), 0, 1), 0, 1, 0)
+	if not bar or not bar:IsA("Frame") then
+		warn("[HealthBar] Missing bar for", model:GetFullName())
+		return
 	end
+	local ratio = math.clamp((tonumber(hp) or 0) / math.max(tonumber(maxHp) or 1, 1), 0, 1)
+	bar.Size = UDim2.new(ratio, 0, 1, 0)
 end
 
 return CharacterRigBuilder
