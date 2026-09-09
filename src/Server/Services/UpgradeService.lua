@@ -22,7 +22,7 @@ function UpgradeService:Init(services)
 	if upgrade then
 		upgrade.OnServerInvoke = function(player, statName, amount)
 			local profile = DataService.GetProfile(player)
-			if not profile or not UpgradesConfig.Stats[statName] then
+			if not profile or not DataService.IsProfileLoaded(player) or not UpgradesConfig.Stats[statName] then
 				return { success = false }
 			end
 			-- Стата должна быть открыта текущим престижем
@@ -56,8 +56,9 @@ function UpgradeService:Init(services)
 			end
 			profile.XP -= cost
 			profile.Upgrades[statName] = level + count
+			DataService.MarkDirty(player, "UpgradeStat")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "UpgradeStat")
 			return { success = true, level = level + count, bought = count, spent = cost, profile = Util.DeepCopy(profile) }
 		end
 	end
@@ -66,7 +67,7 @@ function UpgradeService:Init(services)
 	if prestige then
 		prestige.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false, error = "No profile" }
 			end
 			if not UpgradesConfig.Prestige.Enabled then
@@ -76,6 +77,9 @@ function UpgradeService:Init(services)
 			local threshold = UpgradesConfig.GetPrestigeThreshold(profile.PrestigePoints or 0)
 			if totalLevels < threshold then
 				return { success = false, error = string.format("Нужно %d уровней, сейчас %d", threshold, totalLevels) }
+			end
+			if DataService.BackupProfile then
+				DataService.BackupProfile(player, "PrestigeReset")
 			end
 			-- Сбрасываем прокачку и чекпоинт волны (вариант A), начисляем престиж.
 			profile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
@@ -88,8 +92,9 @@ function UpgradeService:Init(services)
 					WaveService.EndBattle(false)
 				end)
 			end
+			DataService.MarkDirty(player, "PrestigeReset")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "PrestigeReset")
 			return {
 				success = true,
 				points = profile.PrestigePoints,
@@ -103,7 +108,7 @@ function UpgradeService:Init(services)
 	if ascend then
 		ascend.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false, error = "No profile" }
 			end
 			if not UpgradesConfig.Ascension.Enabled then
@@ -112,6 +117,9 @@ function UpgradeService:Init(services)
 			local cost = UpgradesConfig.GetAscensionCost(profile.Ascensions or 0)
 			if (profile.PrestigePoints or 0) < cost then
 				return { success = false, error = string.format("Нужно %d очков престижа, есть %d", cost, profile.PrestigePoints or 0) }
+			end
+			if DataService.BackupProfile then
+				DataService.BackupProfile(player, "Ascend")
 			end
 			-- Вознесение: сжигаем очки престижа и уровни, волна снова с 1.
 			profile.PrestigePoints = 0
@@ -124,8 +132,9 @@ function UpgradeService:Init(services)
 					WaveService.EndBattle(false)
 				end)
 			end
+			DataService.MarkDirty(player, "Ascend")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "Ascend")
 			return {
 				success = true,
 				ascensions = profile.Ascensions,

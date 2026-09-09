@@ -116,7 +116,7 @@ function ShopService:Init(services)
 	if buyWeapon then
 		buyWeapon.OnServerInvoke = function(player, weaponType, tier, slotIndex)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false, error = "No profile" }
 			end
 			ensureInventory(profile)
@@ -156,8 +156,9 @@ function ShopService:Init(services)
 			-- Экипируем только один слот (1 покупка = 1 единица)
 			profile.SquadLoadout[equipSlot] = { WeaponType = weaponType, Tier = tier }
 
+			DataService.MarkDirty(player, "BuyWeapon")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "BuyWeapon")
 			return { success = true, equippedSlot = equipSlot, profile = profilePayload(profile) }
 		end
 	end
@@ -166,7 +167,7 @@ function ShopService:Init(services)
 	if buyArmor then
 		buyArmor.OnServerInvoke = function(player, tier, slotIndex)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -207,8 +208,9 @@ function ShopService:Init(services)
 			profile.SquadArmor[equipSlot] = tier
 			profile.EquippedArmorTier = tier
 
+			DataService.MarkDirty(player, "BuyArmor")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "BuyArmor")
 			return { success = true, equippedSlot = equipSlot, profile = profilePayload(profile) }
 		end
 	end
@@ -217,7 +219,7 @@ function ShopService:Init(services)
 	if setArmor then
 		setArmor.OnServerInvoke = function(player, slotIndex, tier)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -229,8 +231,9 @@ function ShopService:Init(services)
 			end
 			if tier == 0 then
 				profile.SquadArmor[slotIndex] = 0
+				DataService.MarkDirty(player, "SetSquadArmor")
 				DataService.NotifyProfile(player)
-				DataService.SaveProfile(player, false)
+				DataService.SaveProfile(player, true, true, "SetSquadArmor")
 				return { success = true, profile = profilePayload(profile) }
 			end
 			local copies = tonumber(profile.ArmorCopies[tier]) or 0
@@ -242,8 +245,9 @@ function ShopService:Init(services)
 			end
 			profile.SquadArmor[slotIndex] = tier
 			profile.EquippedArmorTier = tier
+			DataService.MarkDirty(player, "SetSquadArmor")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, false)
+			DataService.SaveProfile(player, true, true, "SetSquadArmor")
 			return { success = true, profile = profilePayload(profile) }
 		end
 	end
@@ -252,7 +256,7 @@ function ShopService:Init(services)
 	if setLoadout then
 		setLoadout.OnServerInvoke = function(player, slotIndex, weaponType, tier)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false }
 			end
 			ensureInventory(profile)
@@ -280,8 +284,9 @@ function ShopService:Init(services)
 				return { success = false, error = "Нет свободной копии оружия" }
 			end
 			profile.SquadLoadout[slotIndex] = { WeaponType = weaponType, Tier = tier }
+			DataService.MarkDirty(player, "SetSquadLoadout")
 			DataService.NotifyProfile(player)
-			DataService.SaveProfile(player, false)
+			DataService.SaveProfile(player, true, true, "SetSquadLoadout")
 			return { success = true, profile = profilePayload(profile) }
 		end
 	end

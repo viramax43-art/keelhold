@@ -412,6 +412,28 @@ function WaveService.StartBattle(teleportData)
 		return
 	end
 
+	-- Не начинаем бой, пока профили не готовы (защита от пустых данных)
+	local profileDeadline = os.clock() + 12
+	while os.clock() < profileDeadline do
+		local allReady = true
+		for _, p in ipairs(players) do
+			if not p.Parent or p:GetAttribute("BD_ProfileReady") ~= true then
+				allReady = false
+				break
+			end
+		end
+		if allReady then
+			break
+		end
+		task.wait(0.2)
+	end
+	for _, p in ipairs(players) do
+		if not p.Parent or p:GetAttribute("BD_ProfileReady") ~= true then
+			Log.Write("Wave", "StartBattle: profile not ready for " .. p.Name .. ", aborting", "WARN")
+			return
+		end
+	end
+
 	local startCheckpoint = 0
 	for _, m in ipairs((teleportData and teleportData.Members) or {}) do
 		startCheckpoint = math.max(startCheckpoint, m.LastCheckpoint or 0)

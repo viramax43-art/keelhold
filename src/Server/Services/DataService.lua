@@ -1,8 +1,7 @@
 --[[
-	DataService — профили через БД:
-	  Studio → LogServer http://127.0.0.1:8765/profile/{userId} (основное)
-	  Live   → DataStore
-	  Плюс атрибуты BD_* на игроке, чтобы HUD не зависел от гонки RemoteEvent.
+	DataService — профили через Roblox DataStoreService (UpdateAsync + session lock).
+	Публичный API сохранён: GetProfile, SaveProfile, AddGold, AddXP, ResetProfile, NotifyProfile.
+	LogServer / StudioProfiles — только при AllowLegacyStudioFallback (не production).
 ]]
 
 local Players = game:GetService("Players")
@@ -18,283 +17,116 @@ local Log = require(ReplicatedStorage.Shared.Util.Log)
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
 
 local DataService = {}
-local profiles = {}
-local loadDone = {} -- [userId] = true after first load attempt finished
-local store = nil
-local RemoteService = nil
-local STUDIO_URL = "http://127.0.0.1:8765/profile/"
-local saveDebounce = {}
-local lastSaveClock = {}
-local forcedSaveQueued = {}
 
-local function safeCall(fn, ...)
-	local args = table.pack(...)
-	for attempt = 1, 3 do
-		local ok, result = pcall(function()
-			return fn(table.unpack(args, 1, args.n))
-		end)
-		if ok then
-			return true, result
-		end
-		Log.Write("Data", string.format("Attempt %d failed: %s", attempt, tostring(result)), "WARN")
-		if attempt < 3 then
-			task.wait(1 * attempt)
-		end
+local profiles = {} -- [userId] = profile Data
+local saveStates = {} -- [userId] = state
+local loadDone = {} -- [userId] = true after load attempt finished
+local store = nil
+local backupStore = nil
+local RemoteService = nil
+
+local DS = GameConfig.DataStore or {}
+local SESSION_LOCK_TTL = DS.SessionLockTTL or 120
+local SESSION_HEARTBEAT_INTERVAL = DS.SessionHeartbeatInterval or 45
+local AUTO_SAVE_INTERVAL = DS.AutoSaveInterval or 60
+local MAX_LOAD_RETRIES = DS.MaxLoadRetries or 8
+local MAX_SAVE_RETRIES = DS.MaxSaveRetries or 5
+local ALLOW_LEGACY = DS.AllowLegacyStudioFallback == true
+local SCHEMA_VERSION = 2
+
+local SESSION_ID = game.JobId
+if SESSION_ID == "" then
+	SESSION_ID = "Studio-" .. HttpService:GenerateGUID(false)
+end
+
+local LOAD_DELAYS = { 2, 4, 6, 8, 10, 12, 15, 20 }
+
+local function dsCfg()
+	return GameConfig.DataStore or DS
+end
+
+local function retryDelay(attempt: number): number
+	local base = math.min(2 ^ (attempt - 1), 20)
+	return base + math.random() * 0.5
+end
+
+local function shortSession(id: string?): string
+	local s = tostring(id or "")
+	if #s <= 12 then
+		return s
 	end
-	return false, nil
+	return string.sub(s, 1, 8) .. "…"
 end
 
 local function getStore()
 	if store ~= nil then
 		return store
 	end
+	local name = (dsCfg().PlayerProfile) or "BridgeDefense_Profile_v1"
 	local ok, result = pcall(function()
-		return DataStoreService:GetDataStore(GameConfig.DataStore.PlayerProfile)
+		return DataStoreService:GetDataStore(name)
 	end)
 	if ok then
 		store = result
 	else
 		store = false
-		Log.Write("Data", "DataStore unavailable; Studio LogServer is the profile DB")
+		Log.Write("Data", "PROFILE_LOAD_FAILED DataStore GetDataStore: " .. tostring(result), "ERROR")
 	end
 	return store
 end
 
-local function loadFromStudioModule(userId: number)
-	local serverFolder = script.Parent and script.Parent.Parent
-	local dataFolder = serverFolder and serverFolder:FindFirstChild("Data")
-	local mod = dataFolder and dataFolder:FindFirstChild("StudioProfiles")
-	if not mod or not mod:IsA("ModuleScript") then
-		Log.Write("Data", "StudioProfiles module missing under Server.Data", "WARN")
-		return nil
+local function getBackupStore()
+	if backupStore ~= nil then
+		return backupStore
 	end
-	-- Clone + require, иначе Rojo-обновление Source не видно из-за кэша require
-	local ok, tbl = pcall(function()
-		local holder = Instance.new("Folder")
-		holder.Name = "_StudioProfilesLoad"
-		holder.Parent = script
-		local clone = mod:Clone()
-		clone.Parent = holder
-		local result = require(clone)
-		holder:Destroy()
-		return result
+	local name = (dsCfg().ProfileBackups) or "BridgeDefense_ProfileBackups_v1"
+	local ok, result = pcall(function()
+		return DataStoreService:GetDataStore(name)
 	end)
-	if not ok or type(tbl) ~= "table" then
-		ok, tbl = pcall(require, mod)
-		if not ok or type(tbl) ~= "table" then
-			Log.Write("Data", "StudioProfiles require failed: " .. tostring(tbl), "WARN")
-			return nil
-		end
+	if ok then
+		backupStore = result
+	else
+		backupStore = false
 	end
-	local rawJson = tbl[userId] or tbl[tostring(userId)]
-	if type(rawJson) ~= "string" or rawJson == "" then
-		return nil
-	end
-	local okJ, data = pcall(function()
-		return HttpService:JSONDecode(rawJson)
-	end)
-	if okJ and type(data) == "table" then
-		return data
-	end
-	Log.Write("Data", "StudioProfiles JSON decode failed for " .. tostring(userId), "WARN")
-	return nil
+	return backupStore
 end
 
-local function profileScore(p): number
-	if type(p) ~= "table" then
-		return -1
-	end
-	return (tonumber(p.TotalXP) or 0)
-		+ (tonumber(p.Gold) or 0)
-		+ (tonumber(p.HighestWave) or 0) * 1000
-		+ (tonumber(p.PrestigePoints) or 0) * 500
-		+ (tonumber(p.OwnedArmorTier) or 0) * 50
+-- ─── Envelope / migration ───────────────────────────────────────────
+
+local function isEnvelope(raw): boolean
+	return type(raw) == "table" and type(raw.Data) == "table" and type(raw.Meta) == "table"
 end
 
--- Устаревший снимок (меньше TotalXP) нельзя писать поверх прогресса.
--- Gold может падать (шоп) — смотрим TotalXP / HighestWave.
-local function isStaleVsExisting(incoming, existing): boolean
-	if type(incoming) ~= "table" or type(existing) ~= "table" then
-		return false
+local function normalizeEnvelope(raw, _userId: number)
+	if isEnvelope(raw) then
+		local env = {
+			SchemaVersion = tonumber(raw.SchemaVersion) or 1,
+			Data = raw.Data,
+			Meta = {
+				Revision = tonumber(raw.Meta.Revision) or 0,
+				CreatedAt = tonumber(raw.Meta.CreatedAt) or os.time(),
+				UpdatedAt = tonumber(raw.Meta.UpdatedAt) or os.time(),
+				SessionId = tostring(raw.Meta.SessionId or ""),
+				SessionStartedAt = tonumber(raw.Meta.SessionStartedAt) or 0,
+				LastHeartbeatAt = tonumber(raw.Meta.LastHeartbeatAt) or 0,
+			},
+		}
+		return env
 	end
-	local inXp = tonumber(incoming.TotalXP) or 0
-	local exXp = tonumber(existing.TotalXP) or 0
-	if inXp < exXp then
-		return true
-	end
-	if inXp == exXp then
-		local inWave = tonumber(incoming.HighestWave) or 0
-		local exWave = tonumber(existing.HighestWave) or 0
-		if inWave < exWave then
-			return true
-		end
-	end
-	return false
-end
 
-local function httpLoadProfile(userId: number)
-	local urls = {
-		"http://127.0.0.1:8765/profile/" .. tostring(userId),
-		"http://localhost:8765/profile/" .. tostring(userId),
+	local legacyData = if type(raw) == "table" then raw else Util.DeepCopy(ProfileTemplate)
+	return {
+		SchemaVersion = 1,
+		Data = legacyData,
+		Meta = {
+			Revision = 0,
+			CreatedAt = os.time(),
+			UpdatedAt = os.time(),
+			SessionId = "",
+			SessionStartedAt = 0,
+			LastHeartbeatAt = 0,
+		},
 	}
-	for _, url in ipairs(urls) do
-		local ok, body = pcall(function()
-			return HttpService:GetAsync(url)
-		end)
-		if ok and body and body ~= "" and body ~= "missing" then
-			local okJ, data = pcall(function()
-				return HttpService:JSONDecode(body)
-			end)
-			if okJ and type(data) == "table" then
-				return data
-			end
-		end
-	end
-	return nil
-end
-
--- Не ждать вечно, если LogServer тупит; модуль StudioProfiles — основной fallback
-local function httpLoadProfileTimed(userId: number, timeoutSec: number?)
-	local result = nil
-	local done = false
-	task.spawn(function()
-		result = httpLoadProfile(userId)
-		done = true
-	end)
-	local deadline = os.clock() + (timeoutSec or 1.5)
-	while not done and os.clock() < deadline do
-		task.wait(0.05)
-	end
-	return result
-end
-
-local function studioLoad(userId: number)
-	-- Берём САМЫЙ богатый источник: модуль Rojo и/или LogServer HTTP
-	local best = nil
-	local bestScore = -1
-	local function consider(data, src: string)
-		if type(data) ~= "table" then
-			return
-		end
-		local s = profileScore(data)
-		if s > bestScore then
-			best = data
-			bestScore = s
-			Log.Write("Data", string.format("studioLoad candidate %s score=%d Gold=%s", src, s, tostring(data.Gold)))
-		end
-	end
-	-- Сначала модуль (мгновенно), потом HTTP
-	consider(loadFromStudioModule(userId), "StudioProfiles")
-	consider(httpLoadProfileTimed(userId, 1.5), "LogServer")
-	return best
-end
-
-local function studioLoadWithRetry(userId: number)
-	local data = studioLoad(userId)
-	if data then
-		return data
-	end
-	for attempt = 1, 4 do
-		task.wait(0.3 * attempt)
-		data = studioLoad(userId)
-		if data then
-			return data
-		end
-	end
-	return nil
-end
-
-local function studioSave(userId: number, profile, force: boolean?): boolean
-	local clean = Util.PrepareProfileForStorage(profile)
-	local ok, json = pcall(function()
-		return HttpService:JSONEncode(clean)
-	end)
-	if not ok or type(json) ~= "string" then
-		Log.Write("Data", "studioSave JSONEncode failed: " .. tostring(json), "WARN")
-		return false
-	end
-
-	local gold = tonumber(clean.Gold) or 0
-	local xp = tonumber(clean.XP) or 0
-	local totalXp = tonumber(clean.TotalXP) or 0
-	local wave = tonumber(clean.HighestWave) or 0
-
-	-- Только модуль Rojo (без HTTP) — иначе зависший LogServer блокирует сейв навсегда
-	if not force then
-		local existing = loadFromStudioModule(userId)
-		if existing and isStaleVsExisting(clean, existing) then
-			Log.Write(
-				"Data",
-				string.format(
-					"Skip stale studioSave userId=%d inXP=%d diskXP=%d",
-					userId,
-					totalXp,
-					tonumber(existing.TotalXP) or 0
-				),
-				"WARN"
-			)
-			return true
-		end
-	end
-
-	-- Маркеры в Output (Watch-Logs). Полный JSON только print — НЕ через /log
-	-- (иначе старые батчи Log.Write дают Skip stale и рвут соединения).
-	local meta = string.format("__BD_PROFILE_META__|%d|%d|%d|%d|%d", userId, gold, xp, totalXp, wave)
-	print(string.format("[BridgeDefense][Data] %s", meta))
-	if #json < 12000 then
-		print(string.format("[BridgeDefense][Data] __BD_PROFILE_SAVE__|%d|%s", userId, json))
-	end
-	-- Короткий META в /log (без полного JSON) — запасной канал
-	Log.Write("Data", meta)
-
-	-- HTTP профиль в фоне (один POST)
-	task.spawn(function()
-		pcall(function()
-			HttpService.HttpEnabled = true
-		end)
-		local url = string.format("http://127.0.0.1:8765/profile/%d%s", userId, force and "?force=1" or "")
-		local okPost, err = pcall(function()
-			HttpService:PostAsync(url, json, Enum.HttpContentType.ApplicationJson)
-		end)
-		if okPost then
-			-- без лишнего Log.Write — меньше /log спама во время боя
-		else
-			local ok2 = pcall(function()
-				HttpService:PostAsync(
-					string.format("http://localhost:8765/profile/%d%s", userId, force and "?force=1" or ""),
-					json,
-					Enum.HttpContentType.ApplicationJson
-				)
-			end)
-			if not ok2 then
-				Log.Write("Data", "LogServer POST fail (markers still emitted): " .. tostring(err), "WARN")
-			end
-		end
-	end)
-
-	return true
-end
-
-local function isNearFreshTemplate(p): boolean
-	if type(p) ~= "table" then
-		return true
-	end
-	local templateGold = ProfileTemplate.Gold or 100
-	return (tonumber(p.TotalXP) or 0) == 0
-		and (tonumber(p.HighestWave) or 0) == 0
-		and (tonumber(p.PrestigePoints) or 0) == 0
-		and (tonumber(p.Gold) or 0) <= templateGold
-end
-
-local function syncPlayerAttrs(player: Player, profile)
-	if not player or not profile then
-		return
-	end
-	player:SetAttribute("BD_Gold", tonumber(profile.Gold) or 0)
-	player:SetAttribute("BD_XP", tonumber(profile.XP) or 0)
-	player:SetAttribute("BD_TotalXP", tonumber(profile.TotalXP) or 0)
-	player:SetAttribute("BD_Level", tonumber(profile.Level) or 1)
-	player:SetAttribute("BD_ProfileReady", true)
 end
 
 local function migrateInventory(profile, raw)
@@ -341,170 +173,329 @@ local function migrateInventory(profile, raw)
 	end
 end
 
-local function loadProfile(player: Player)
-	local userId = player.UserId
-	local studioRaw = nil
-	local dsRaw = nil
-
-	if RunService:IsStudio() then
-		studioRaw = studioLoadWithRetry(userId)
-		if studioRaw then
-			Log.Write(
-				"Data",
-				string.format(
-					"DB load OK userId=%d %s Gold=%s XP=%s Wave=%s",
-					userId,
-					player.Name,
-					tostring(studioRaw.Gold),
-					tostring(studioRaw.XP),
-					tostring(studioRaw.HighestWave)
-				)
-			)
-		else
-			Log.Write(
-				"Data",
-				string.format("DB load MISS userId=%d %s — check StudioProfiles.lua / Watch-Logs", userId, player.Name),
-				"WARN"
-			)
-		end
-	end
-
-	-- В Studio DataStore часто пустой/устаревший — берём только если богаче LogServer
-	local ds = getStore()
-	if ds then
-		local ok, data = safeCall(ds.GetAsync, ds, tostring(userId))
-		if ok and type(data) == "table" then
-			dsRaw = data
-		end
-	end
-
-	local raw = nil
-	if RunService:IsStudio() then
-		if studioRaw and dsRaw then
-			raw = if profileScore(studioRaw) >= profileScore(dsRaw) then studioRaw else dsRaw
-		else
-			raw = studioRaw or dsRaw
-		end
-	else
-		raw = dsRaw or studioRaw
-	end
-
-	local loadedFromDb = raw ~= nil
-	local profile = Util.ReconcileProfile(raw, ProfileTemplate)
+local function materializeProfile(dataTable, rawSource)
+	local profile = Util.ReconcileProfile(dataTable, ProfileTemplate)
 	Util.NormalizeProfileMaps(profile)
 	profile.Level = Util.LevelFromTotalXP(profile.TotalXP or 0, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
-	migrateInventory(profile, raw)
+	migrateInventory(profile, rawSource or dataTable)
 	Util.NormalizeProfileMaps(profile)
-
-	profiles[userId] = profile
-	loadDone[userId] = true
-	syncPlayerAttrs(player, profile)
-
-	-- Не пишем на диск при загрузке: stale StudioProfiles + studioSave затирали свежий JSON.
-	if RunService:IsStudio() and not loadedFromDb and not isNearFreshTemplate(profile) then
-		studioSave(userId, profile)
-	elseif RunService:IsStudio() and not loadedFromDb then
-		Log.Write("Data", "Skip initial DB write for fresh template (keep existing file if any)")
-	end
 	return profile
+end
+
+local function validateProfileNumbers(profile): (boolean, string?)
+	if type(profile) ~= "table" then
+		return false, "not a table"
+	end
+	local function nonNeg(name)
+		local v = tonumber(profile[name])
+		if v == nil or v ~= v or v < 0 then
+			return false, name
+		end
+		return true
+	end
+	for _, key in ipairs({ "Gold", "XP", "TotalXP", "PrestigePoints", "Ascensions", "HighestWave" }) do
+		local ok, bad = nonNeg(key)
+		if not ok then
+			return false, "invalid " .. tostring(bad)
+		end
+	end
+	local level = tonumber(profile.Level)
+	if level == nil or level < 1 or level > 10000 then
+		return false, "invalid Level"
+	end
+	local okEnc, encErr = pcall(function()
+		HttpService:JSONEncode(Util.PrepareProfileForStorage(profile))
+	end)
+	if not okEnc then
+		return false, "JSONEncode failed: " .. tostring(encErr)
+	end
+	return true, nil
+end
+
+local function syncPlayerAttrs(player: Player, profile, ready: boolean?)
+	if not player then
+		return
+	end
+	if profile then
+		player:SetAttribute("BD_Gold", tonumber(profile.Gold) or 0)
+		player:SetAttribute("BD_XP", tonumber(profile.XP) or 0)
+		player:SetAttribute("BD_TotalXP", tonumber(profile.TotalXP) or 0)
+		player:SetAttribute("BD_Level", tonumber(profile.Level) or 1)
+	end
+	player:SetAttribute("BD_ProfileReady", ready == true)
+end
+
+-- ─── Legacy Studio fallback (optional) ──────────────────────────────
+
+local function loadFromStudioModule(userId: number)
+	local serverFolder = script.Parent and script.Parent.Parent
+	local dataFolder = serverFolder and serverFolder:FindFirstChild("Data")
+	local mod = dataFolder and dataFolder:FindFirstChild("StudioProfiles")
+	if not mod or not mod:IsA("ModuleScript") then
+		return nil
+	end
+	local ok, tbl = pcall(require, mod)
+	if not ok or type(tbl) ~= "table" then
+		return nil
+	end
+	local rawJson = tbl[userId] or tbl[tostring(userId)]
+	if type(rawJson) ~= "string" or rawJson == "" then
+		return nil
+	end
+	local okJ, data = pcall(function()
+		return HttpService:JSONDecode(rawJson)
+	end)
+	if okJ and type(data) == "table" then
+		return data
+	end
+	return nil
+end
+
+-- ─── Session acquire / save ─────────────────────────────────────────
+
+local function tryAcquireSession(userId: number): (boolean, any?, string?)
+	local ds = getStore()
+	if not ds then
+		return false, nil, "DataStore unavailable"
+	end
+
+	local acquired = false
+	local ok, result = pcall(function()
+		return ds:UpdateAsync(tostring(userId), function(current)
+			local now = os.time()
+			local envelope = normalizeEnvelope(current, userId)
+			local meta = envelope.Meta
+			local currentSession = meta.SessionId or ""
+			local lastHeartbeat = tonumber(meta.LastHeartbeatAt) or 0
+
+			local lockIsActive = currentSession ~= ""
+				and currentSession ~= SESSION_ID
+				and (now - lastHeartbeat) < SESSION_LOCK_TTL
+
+			if lockIsActive then
+				acquired = false
+				return envelope
+			end
+
+			acquired = true
+			local wasLegacy = not isEnvelope(current)
+			if wasLegacy then
+				Log.Write("Data", string.format("PROFILE_LEGACY_MIGRATED userId=%d", userId))
+			end
+
+			meta.SessionId = SESSION_ID
+			meta.SessionStartedAt = if (tonumber(meta.SessionStartedAt) or 0) > 0
+				then meta.SessionStartedAt
+				else now
+			meta.LastHeartbeatAt = now
+			meta.UpdatedAt = now
+			meta.Revision = (tonumber(meta.Revision) or 0) + 1
+			envelope.Meta = meta
+			envelope.SchemaVersion = math.max(tonumber(envelope.SchemaVersion) or 1, SCHEMA_VERSION)
+
+			-- Новый игрок: пустой current → шаблон
+			if type(current) ~= "table" then
+				envelope.Data = Util.DeepCopy(ProfileTemplate)
+			end
+
+			return envelope
+		end)
+	end)
+
+	if not ok then
+		return false, nil, "DataStore UpdateAsync failed: " .. tostring(result)
+	end
+	if not acquired then
+		return false, result, "Profile is locked by another server"
+	end
+	return true, result, nil
+end
+
+local function createBackup(userId: number, profile, revision: number, reason: string?)
+	local bs = getBackupStore()
+	if not bs then
+		return false
+	end
+	local key = string.format("%d:%d", userId, revision)
+	local payload = {
+		Reason = reason or "backup",
+		At = os.time(),
+		SessionId = SESSION_ID,
+		Data = Util.PrepareProfileForStorage(profile),
+	}
+	local ok, err = pcall(function()
+		bs:SetAsync(key, payload)
+	end)
+	if ok then
+		Log.Write("Data", string.format("PROFILE_BACKUP_CREATED userId=%d rev=%d reason=%s", userId, revision, tostring(reason)))
+	else
+		Log.Write("Data", "Backup failed: " .. tostring(err), "WARN")
+	end
+	return ok
+end
+
+local function saveProfileInternal(player: Player, reason: string?, releaseSession: boolean?): (boolean, string?)
+	local userId = player.UserId
+	local state = saveStates[userId]
+	local profile = profiles[userId]
+	if not state or not profile then
+		return false, "Profile is not loaded"
+	end
+
+	local ds = getStore()
+	if not ds then
+		return false, "DataStore unavailable"
+	end
+
+	local valid, verr = validateProfileNumbers(profile)
+	if not valid then
+		Log.Write("Data", string.format("PROFILE_SAVE_FAILED userId=%d invalid=%s", userId, tostring(verr)), "ERROR")
+		return false, verr
+	end
+
+	local snapshot = Util.DeepCopy(profile)
+	local snapshotRevision = state.Revision
+	local now = os.time()
+
+	Log.Write(
+		"Data",
+		string.format(
+			"PROFILE_SAVE_START userId=%d reason=%s rev=%d release=%s sess=%s",
+			userId,
+			tostring(reason),
+			snapshotRevision,
+			tostring(releaseSession == true),
+			shortSession(SESSION_ID)
+		)
+	)
+
+	local lostOwnership = false
+	local ok, result = pcall(function()
+		return ds:UpdateAsync(tostring(userId), function(current)
+			local envelope = normalizeEnvelope(current, userId)
+			if envelope.Meta.SessionId ~= SESSION_ID then
+				lostOwnership = true
+				return nil
+			end
+			envelope.Data = Util.PrepareProfileForStorage(snapshot)
+			envelope.SchemaVersion = SCHEMA_VERSION
+			envelope.Meta.Revision = (tonumber(envelope.Meta.Revision) or 0) + 1
+			envelope.Meta.UpdatedAt = now
+			if releaseSession then
+				envelope.Meta.SessionId = ""
+				envelope.Meta.SessionStartedAt = 0
+				envelope.Meta.LastHeartbeatAt = 0
+			else
+				envelope.Meta.LastHeartbeatAt = now
+			end
+			return envelope
+		end)
+	end)
+
+	if not ok then
+		Log.Write("Data", string.format("PROFILE_SAVE_FAILED userId=%d err=%s", userId, tostring(result)), "ERROR")
+		return false, tostring(result)
+	end
+	if result == nil then
+		local msg = if lostOwnership then "Lost session ownership" else "UpdateAsync returned nil"
+		Log.Write("Data", string.format("PROFILE_SAVE_FAILED userId=%d err=%s", userId, msg), "ERROR")
+		return false, msg
+	end
+
+	state.LastSavedRevision = snapshotRevision
+	if state.Revision == snapshotRevision then
+		state.Dirty = false
+	else
+		state.Dirty = true
+	end
+
+	Log.Write("Data", string.format("PROFILE_SAVE_SUCCESS userId=%d rev=%d", userId, snapshotRevision))
+	if releaseSession then
+		Log.Write("Data", string.format("PROFILE_LOCK_RELEASED userId=%d", userId))
+	end
+	return true, nil
+end
+
+local function runSaveQueue(player: Player, reason: string?)
+	local userId = player.UserId
+	local state = saveStates[userId]
+	if not state or state.SaveInProgress then
+		if state then
+			state.SaveRequested = true
+		end
+		return
+	end
+
+	state.SaveInProgress = true
+	state.SaveRequested = false
+
+	task.spawn(function()
+		local attempt = 0
+		while attempt < MAX_SAVE_RETRIES do
+			attempt += 1
+			local release = state.Closing == true
+			local ok, err = saveProfileInternal(player, reason or "queue", release)
+			if ok then
+				break
+			end
+			Log.Write(
+				"Data",
+				string.format("PROFILE_SAVE_RETRY userId=%d attempt=%d err=%s", userId, attempt, tostring(err)),
+				"WARN"
+			)
+			if state.Closing and attempt >= MAX_SAVE_RETRIES then
+				break
+			end
+			task.wait(retryDelay(attempt))
+		end
+
+		-- Leaderboard push (best-effort)
+		pcall(function()
+			local LB = require(script.Parent.LeaderboardService)
+			if LB and LB.PushPlayer and player.Parent then
+				LB.PushPlayer(player)
+			end
+		end)
+
+		state.SaveInProgress = false
+		if state.SaveRequested or (state.Dirty and not state.Closing) then
+			state.SaveRequested = false
+			if profiles[userId] then
+				runSaveQueue(player, "followup")
+			end
+		end
+	end)
+end
+
+-- ─── Public API ─────────────────────────────────────────────────────
+
+function DataService.IsProfileLoaded(player: Player): boolean
+	return profiles[player.UserId] ~= nil and player:GetAttribute("BD_ProfileReady") == true
+end
+
+function DataService.GetProfileStatus(player: Player)
+	local state = saveStates[player.UserId]
+	return {
+		Loaded = profiles[player.UserId] ~= nil,
+		Dirty = state and state.Dirty or false,
+		Revision = state and state.Revision or 0,
+		LastSavedRevision = state and state.LastSavedRevision or 0,
+		SaveInProgress = state and state.SaveInProgress or false,
+		SessionId = SESSION_ID,
+	}
 end
 
 function DataService.GetProfile(player: Player)
 	return profiles[player.UserId]
 end
 
-function DataService.SaveProfile(player: Player, immediate: boolean?, bypassRateLimit: boolean?)
-	local profile = profiles[player.UserId]
-	if not profile then
+function DataService.MarkDirty(player: Player, _reason: string?)
+	local state = saveStates[player.UserId]
+	if not state then
 		return
 	end
-	local userId = player.UserId
-	if not immediate then
-		if saveDebounce[userId] then
-			return
-		end
-		saveDebounce[userId] = true
-		task.delay(3.0, function()
-			saveDebounce[userId] = nil
-			DataService.SaveProfile(player, true)
-		end)
-		return
-	end
-	local now = os.clock()
-	if not bypassRateLimit and lastSaveClock[userId] and (now - lastSaveClock[userId]) < 2.0 then
-		if not forcedSaveQueued[userId] then
-			forcedSaveQueued[userId] = true
-			local waitTime = math.max(0.05, 2.0 - (now - lastSaveClock[userId]))
-			task.delay(waitTime, function()
-				forcedSaveQueued[userId] = nil
-				if profiles[userId] and player.Parent then
-					DataService.SaveProfile(player, true)
-				end
-			end)
-		end
-		return
-	end
-	lastSaveClock[userId] = now
-	syncPlayerAttrs(player, profile)
-
-	-- Обновить лидерборд при каждом реальном сейве
-	task.defer(function()
-		pcall(function()
-			local LB = require(script.Parent.LeaderboardService)
-			if LB and LB.PushPlayer then
-				LB.PushPlayer(player)
-			end
-		end)
-	end)
-
-	local ds = getStore()
-	if ds then
-		local ok = safeCall(ds.SetAsync, ds, tostring(userId), Util.PrepareProfileForStorage(profile))
-		if not ok then
-			Log.Write("Data", "CRITICAL: Failed to save DataStore for " .. player.Name, "ERROR")
-		end
-	end
-
-	if RunService:IsStudio() then
-		local existing = loadFromStudioModule(userId)
-		if existing and isStaleVsExisting(profile, existing) then
-			Log.Write(
-				"Data",
-				string.format(
-					"Skip DB overwrite: disk richer (diskXP=%s memXP=%s)",
-					tostring(existing.TotalXP),
-					tostring(profile.TotalXP)
-				),
-				"WARN"
-			)
-		else
-			local saved = studioSave(userId, profile)
-			if not saved then
-				Log.Write("Data", "CRITICAL: LogServer DB save failed for " .. player.Name, "ERROR")
-			end
-		end
-	end
-end
-
-function DataService.ResetProfile(player: Player)
-	local fresh = Util.DeepCopy(ProfileTemplate)
-	fresh.Level = Util.LevelFromTotalXP(0, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
-	profiles[player.UserId] = fresh
-	loadDone[player.UserId] = true
-	saveDebounce[player.UserId] = nil
-	forcedSaveQueued[player.UserId] = nil
-	syncPlayerAttrs(player, fresh)
-	DataService.NotifyProfile(player)
-	-- Force overwrite DB on explicit reset
-	if RunService:IsStudio() then
-		studioSave(player.UserId, fresh, true)
-	end
-	local ds = getStore()
-	if ds then
-		safeCall(ds.SetAsync, ds, tostring(player.UserId), fresh)
-	end
-	Log.Write("Data", player.Name .. " profile reset (new player)")
-	return fresh
+	state.Revision += 1
+	state.Dirty = true
 end
 
 function DataService.NotifyProfile(player: Player)
@@ -512,76 +503,259 @@ function DataService.NotifyProfile(player: Player)
 	if not profile then
 		return
 	end
-	syncPlayerAttrs(player, profile)
+	syncPlayerAttrs(player, profile, true)
 	if RemoteService then
 		RemoteService.FireClient(player, RemoteNames.ProfileUpdated, Util.DeepCopy(profile))
 	end
 end
 
-local function notifyWhenClientReady(player: Player)
-	task.spawn(function()
-		-- Клиент часто пропускает первый FireClient — шлём несколько раз
-		for i = 1, 8 do
-			if not player.Parent then
-				return
-			end
-			if i == 1 then
-				task.wait(0.5)
-			else
-				task.wait(1.0)
-			end
-			if profiles[player.UserId] then
-				DataService.NotifyProfile(player)
-			end
+function DataService.BackupProfile(player: Player, reason: string?): boolean
+	local userId = player.UserId
+	local profile = profiles[userId]
+	local state = saveStates[userId]
+	if not profile or not state then
+		return false
+	end
+	return createBackup(userId, profile, state.Revision, reason)
+end
+
+--[[
+	SaveProfile(player, immediate?, force?, reason?)
+	Не вызывает MarkDirty — вызывающий код должен MarkDirty после изменения профиля.
+	immediate/force ставят сохранение в очередь без debounce.
+]]
+function DataService.SaveProfile(player: Player, immediate: boolean?, force: boolean?, reason: any?)
+	local userId = player.UserId
+	if not profiles[userId] or not saveStates[userId] then
+		return
+	end
+	if typeof(force) == "string" and reason == nil then
+		reason = force
+		force = true
+	end
+
+	local reasonStr = if typeof(reason) == "string" then reason else nil
+
+	if not immediate and not force then
+		-- debounce: схлопываем частые AddGold/AddXP
+		local state = saveStates[userId]
+		if state.DebouncePending then
+			return
 		end
-	end)
+		state.DebouncePending = true
+		task.delay(2.5, function()
+			local st = saveStates[userId]
+			if st then
+				st.DebouncePending = false
+			end
+			if player.Parent and profiles[userId] and st and st.Dirty then
+				runSaveQueue(player, reasonStr or "debounce")
+			end
+		end)
+		return
+	end
+
+	runSaveQueue(player, reasonStr or "immediate")
+end
+
+function DataService.ReleaseProfile(player: Player)
+	local userId = player.UserId
+	-- память чистится снаружи после save; здесь только страховка release если ещё владеем
+	local state = saveStates[userId]
+	if state and profiles[userId] and not state.SaveInProgress then
+		state.Closing = true
+		saveProfileInternal(player, "ReleaseProfile", true)
+	end
+end
+
+function DataService.ResetProfile(player: Player)
+	local userId = player.UserId
+	local state = saveStates[userId]
+	local existing = profiles[userId]
+	if not existing or not state then
+		Log.Write("Data", "ResetProfile blocked: profile not loaded", "WARN")
+		return nil
+	end
+
+	createBackup(userId, existing, state.Revision, "ResetProfile")
+
+	local fresh = Util.DeepCopy(ProfileTemplate)
+	fresh.Level = Util.LevelFromTotalXP(0, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
+	profiles[userId] = fresh
+	state.Revision += 1
+	state.Dirty = true
+	syncPlayerAttrs(player, fresh, true)
+	DataService.NotifyProfile(player)
+	runSaveQueue(player, "ResetProfile")
+	Log.Write("Data", player.Name .. " profile reset")
+	return fresh
 end
 
 function DataService.AddGold(player: Player, amount: number, reason: string?)
 	local profile = profiles[player.UserId]
-	if not profile then
+	if not profile or not DataService.IsProfileLoaded(player) then
 		return
 	end
 	local before = profile.Gold or 0
 	profile.Gold = before + amount
 	Log.Write("Gold", string.format("%s %+d (%s) %d → %d", player.Name, amount, reason or "?", before, profile.Gold))
+	DataService.MarkDirty(player, reason or "Gold")
 	DataService.NotifyProfile(player)
 	DataService.SaveProfile(player, false)
 end
 
 function DataService.AddXP(player: Player, amount: number, reason: string?)
 	local profile = profiles[player.UserId]
-	if not profile then
+	if not profile or not DataService.IsProfileLoaded(player) then
 		return
 	end
 	profile.XP = (profile.XP or 0) + amount
 	profile.TotalXP = (profile.TotalXP or 0) + amount
 	profile.Level = Util.LevelFromTotalXP(profile.TotalXP, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
 	Log.Write("XP", string.format("%s %+d (%s) XP=%d Lv=%d", player.Name, amount, reason or "?", profile.XP, profile.Level))
+	DataService.MarkDirty(player, reason or "XP")
 	DataService.NotifyProfile(player)
 	DataService.SaveProfile(player, false)
 end
 
+-- ─── Load ───────────────────────────────────────────────────────────
+
+local function loadProfile(player: Player): boolean
+	local userId = player.UserId
+	Log.Write("Data", string.format("PROFILE_LOAD_START userId=%d sess=%s", userId, shortSession(SESSION_ID)))
+	syncPlayerAttrs(player, nil, false)
+
+	local ds = getStore()
+
+	-- Optional Studio migration path
+	if not ds and ALLOW_LEGACY and RunService:IsStudio() then
+		Log.Write("Data", "PROFILE_LOAD using legacy StudioProfiles fallback", "WARN")
+		local legacy = loadFromStudioModule(userId)
+		local profile = materializeProfile(legacy, legacy)
+		profiles[userId] = profile
+		saveStates[userId] = {
+			Dirty = true,
+			Revision = 1,
+			LastSavedRevision = 0,
+			SaveInProgress = false,
+			SaveRequested = false,
+			Closing = false,
+			DebouncePending = false,
+		}
+		loadDone[userId] = true
+		syncPlayerAttrs(player, profile, true)
+		Log.Write("Data", "PROFILE_LOAD_SUCCESS (legacy fallback) userId=" .. userId)
+		return true
+	end
+
+	if not ds then
+		Log.Write("Data", "PROFILE_LOAD_FAILED userId=" .. userId .. " no DataStore", "ERROR")
+		loadDone[userId] = true
+		syncPlayerAttrs(player, nil, false)
+		player:Kick("Не удалось загрузить профиль (DataStore). Включите API Services в Studio или переподключитесь.")
+		return false
+	end
+
+	local acquired, envelope, err
+	for attempt = 1, MAX_LOAD_RETRIES do
+		acquired, envelope, err = tryAcquireSession(userId)
+		if acquired and type(envelope) == "table" then
+			break
+		end
+		Log.Write(
+			"Data",
+			string.format(
+				"PROFILE_LOAD_RETRY userId=%d attempt=%d err=%s",
+				userId,
+				attempt,
+				tostring(err)
+			),
+			"WARN"
+		)
+		local delaySec = LOAD_DELAYS[attempt] or (10 + attempt)
+		task.wait(delaySec)
+		if not player.Parent then
+			loadDone[userId] = true
+			return false
+		end
+	end
+
+	if not acquired or type(envelope) ~= "table" then
+		Log.Write("Data", string.format("PROFILE_LOAD_FAILED userId=%d err=%s", userId, tostring(err)), "ERROR")
+		loadDone[userId] = true
+		syncPlayerAttrs(player, nil, false)
+		player:Kick("Не удалось загрузить профиль. Пожалуйста, переподключитесь.")
+		return false
+	end
+
+	Log.Write("Data", string.format("PROFILE_LOCK_ACQUIRED userId=%d rev=%s", userId, tostring(envelope.Meta and envelope.Meta.Revision)))
+
+	local profile = materializeProfile(envelope.Data, envelope.Data)
+	local metaRev = tonumber(envelope.Meta and envelope.Meta.Revision) or 0
+
+	profiles[userId] = profile
+	saveStates[userId] = {
+		Dirty = false,
+		Revision = metaRev,
+		LastSavedRevision = metaRev,
+		SaveInProgress = false,
+		SaveRequested = false,
+		Closing = false,
+		DebouncePending = false,
+	}
+	loadDone[userId] = true
+	syncPlayerAttrs(player, profile, true)
+
+	Log.Write(
+		"Data",
+		string.format(
+			"PROFILE_LOAD_SUCCESS userId=%d Gold=%s TotalXP=%s Wave=%s",
+			userId,
+			tostring(profile.Gold),
+			tostring(profile.TotalXP),
+			tostring(profile.HighestWave)
+		)
+	)
+	return true
+end
+
+local function notifyWhenClientReady(player: Player)
+	task.spawn(function()
+		for i = 1, 8 do
+			if not player.Parent then
+				return
+			end
+			task.wait(if i == 1 then 0.5 else 1.0)
+			if profiles[player.UserId] and player:GetAttribute("BD_ProfileReady") then
+				DataService.NotifyProfile(player)
+			end
+		end
+	end)
+end
+
 function DataService:Init(services)
 	RemoteService = services.RemoteService
-	if RunService:IsStudio() then
-		Log.Write("Data", "Studio DB = LogServer(:8765) + Watch-Logs + StudioProfiles (автономно через open-studio.ps1)")
-		pcall(function()
-			HttpService.HttpEnabled = true
-		end)
-	else
-		Log.Write("Data", "Profile DB = DataStore")
-	end
+	Log.Write(
+		"Data",
+		string.format(
+			"Profile DB = DataStore(%s) UpdateAsync+SessionLock sess=%s legacyFallback=%s",
+			tostring((dsCfg().PlayerProfile)),
+			shortSession(SESSION_ID),
+			tostring(ALLOW_LEGACY)
+		)
+	)
 
 	local getProfile = RemoteService.GetRemote(RemoteNames.GetProfile)
 	if getProfile and getProfile:IsA("RemoteFunction") then
 		getProfile.OnServerInvoke = function(player)
-			local deadline = os.clock() + 12
+			local deadline = os.clock() + 15
 			while player.Parent and not loadDone[player.UserId] and os.clock() < deadline do
 				task.wait(0.1)
 			end
-			local profile = profiles[player.UserId]
-			return profile and Util.DeepCopy(profile) or nil
+			if not DataService.IsProfileLoaded(player) then
+				return nil
+			end
+			return Util.DeepCopy(profiles[player.UserId])
 		end
 	end
 
@@ -589,6 +763,9 @@ function DataService:Init(services)
 	local resetProfile = RemoteService.GetRemote(RemoteNames.ResetProfile)
 	if resetProfile and resetProfile:IsA("RemoteFunction") then
 		resetProfile.OnServerInvoke = function(player)
+			if not DataService.IsProfileLoaded(player) then
+				return { success = false, error = "Профиль не загружен" }
+			end
 			local uid = player.UserId
 			local now = os.clock()
 			if lastReset[uid] and (now - lastReset[uid]) < 2 then
@@ -596,15 +773,20 @@ function DataService:Init(services)
 			end
 			lastReset[uid] = now
 			local profile = DataService.ResetProfile(player)
+			if not profile then
+				return { success = false, error = "Сброс недоступен" }
+			end
 			return { success = true, profile = Util.DeepCopy(profile) }
 		end
 	end
 
 	local function onPlayer(player: Player)
 		task.spawn(function()
-			loadProfile(player)
-			DataService.NotifyProfile(player)
-			notifyWhenClientReady(player)
+			local ok = loadProfile(player)
+			if ok then
+				DataService.NotifyProfile(player)
+				notifyWhenClientReady(player)
+			end
 		end)
 	end
 
@@ -614,33 +796,122 @@ function DataService:Init(services)
 	end
 
 	Players.PlayerRemoving:Connect(function(player)
-		DataService.SaveProfile(player, true, true)
-		profiles[player.UserId] = nil
-		loadDone[player.UserId] = nil
-		saveDebounce[player.UserId] = nil
-		forcedSaveQueued[player.UserId] = nil
+		local userId = player.UserId
+		local state = saveStates[userId]
+		if state then
+			state.Closing = true
+			state.Dirty = true
+			state.Revision += 1
+		end
+		-- Синхронная попытка в этом потоке + очередь
+		if profiles[userId] and state then
+			local deadline = os.clock() + 8
+			while state.SaveInProgress and os.clock() < deadline do
+				task.wait(0.05)
+			end
+			saveProfileInternal(player, "PlayerRemoving", true)
+		end
+		profiles[userId] = nil
+		saveStates[userId] = nil
+		loadDone[userId] = nil
 	end)
 
 	game:BindToClose(function()
-		for _, player in ipairs(Players:GetPlayers()) do
-			DataService.SaveProfile(player, true, true)
+		local list = Players:GetPlayers()
+		local remaining = #list
+		for _, player in ipairs(list) do
+			task.spawn(function()
+				local userId = player.UserId
+				local state = saveStates[userId]
+				if state then
+					state.Closing = true
+					state.Dirty = true
+					state.Revision += 1
+				end
+				if profiles[userId] then
+					local attempts = 0
+					while attempts < MAX_SAVE_RETRIES do
+						attempts += 1
+						local ok = saveProfileInternal(player, "BindToClose", true)
+						if ok then
+							break
+						end
+						task.wait(retryDelay(attempts))
+					end
+				end
+				remaining -= 1
+			end)
 		end
-		task.wait(1.5)
+		local deadline = os.clock() + 25
+		while remaining > 0 and os.clock() < deadline do
+			task.wait(0.1)
+		end
 	end)
 
-	-- Автосейв в Studio каждые 8с
-	if RunService:IsStudio() then
-		task.spawn(function()
-			while true do
-				task.wait(8)
-				for _, player in ipairs(Players:GetPlayers()) do
-					if profiles[player.UserId] then
-						DataService.SaveProfile(player, true, true)
+	-- Autosave (live + Studio)
+	task.spawn(function()
+		while true do
+			task.wait(AUTO_SAVE_INTERVAL)
+			for _, player in ipairs(Players:GetPlayers()) do
+				local state = saveStates[player.UserId]
+				if state and state.Dirty and not state.Closing and not state.SaveInProgress then
+					DataService.SaveProfile(player, true, true, "AutoSave")
+				end
+			end
+		end
+	end)
+
+	-- Session heartbeat (one loop for all)
+	task.spawn(function()
+		while true do
+			task.wait(SESSION_HEARTBEAT_INTERVAL)
+			local ds = getStore()
+			if not ds then
+				continue
+			end
+			for userId, state in pairs(saveStates) do
+				if state.Closing or state.SaveInProgress then
+					continue
+				end
+				-- Heartbeat без перезаписи Data (только Meta), если не dirty
+				if state.Dirty then
+					local player = Players:GetPlayerByUserId(userId)
+					if player then
+						runSaveQueue(player, "HeartbeatDirty")
+					end
+				else
+					local player = Players:GetPlayerByUserId(userId)
+					local hbOk, hbResult = pcall(function()
+						return ds:UpdateAsync(tostring(userId), function(current)
+							local envelope = normalizeEnvelope(current, userId)
+							if envelope.Meta.SessionId ~= SESSION_ID then
+								return nil
+							end
+							envelope.Meta.LastHeartbeatAt = os.time()
+							return envelope
+						end)
+					end)
+					if (not hbOk) or hbResult == nil then
+						Log.Write(
+							"Data",
+							string.format(
+								"PROFILE_LOCK_LOST userId=%d sess=%s",
+								userId,
+								shortSession(SESSION_ID)
+							),
+							"ERROR"
+						)
+						profiles[userId] = nil
+						saveStates[userId] = nil
+						if player then
+							syncPlayerAttrs(player, nil, false)
+							player:Kick("Сессия профиля потеряна. Пожалуйста, переподключитесь.")
+						end
 					end
 				end
 			end
-		end)
-	end
+		end
+	end)
 end
 
 return DataService

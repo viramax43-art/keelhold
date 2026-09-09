@@ -120,8 +120,9 @@ end
 
 function RewardService.OnEnemyKilled(player: Player)
 	local profile = DataService.GetProfile(player)
-	if profile and profile.Stats then
+	if profile and DataService.IsProfileLoaded(player) and profile.Stats then
 		profile.Stats.TotalKills = (profile.Stats.TotalKills or 0) + 1
+		DataService.MarkDirty(player, "TotalKills")
 		DataService.SaveProfile(player, false)
 	end
 	-- добираем дробные остатки за этот удар
@@ -159,7 +160,7 @@ function RewardService.GrantWaveClear(players: { Player }, wave: number): { [num
 			local beforeG, beforeX = RewardService.GetWaveEarnings(p)
 			credit(p, gold, xp, "wave_clear")
 			local profile = DataService.GetProfile(p)
-			if profile then
+			if profile and DataService.IsProfileLoaded(p) then
 				profile.HighestWave = math.max(profile.HighestWave or 0, wave)
 				if profile.Stats then
 					profile.Stats.TotalWaves = (profile.Stats.TotalWaves or 0) + 1
@@ -167,8 +168,9 @@ function RewardService.GrantWaveClear(players: { Player }, wave: number): { [num
 				if wave % (GameConfig.CheckpointInterval or 5) == 0 then
 					profile.LastCheckpoint = wave
 				end
+				DataService.MarkDirty(p, "WaveClear")
 				task.spawn(function()
-					DataService.SaveProfile(p, true)
+					DataService.SaveProfile(p, true, true, "WaveClear")
 				end)
 			end
 			perPlayer[p.UserId] = {

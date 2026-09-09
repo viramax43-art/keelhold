@@ -36,6 +36,9 @@ end
 
 function TeleportService.StartBattle(player: Player)
 	Log.Write("Battle", "StartBattle called by " .. player.Name)
+	if not DataService or not DataService.IsProfileLoaded(player) then
+		return { success = false, error = "Профиль ещё не загружен" }
+	end
 	if WaveService and WaveService.IsBattleBusy and WaveService.IsBattleBusy() then
 		return { success = false, error = "Предыдущий бой ещё завершается" }
 	end

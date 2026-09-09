@@ -61,13 +61,22 @@ local GameConfig = {
 		{ Gold = 500, XP = 300 },
 	},
 
-	-- DataStore ключи
+	-- DataStore ключи и политика сохранения профилей
 	DataStore = {
 		PlayerProfile = "BridgeDefense_Profile_v1",
+		ProfileBackups = "BridgeDefense_ProfileBackups_v1",
 		GlobalConfig = "BridgeDefense_GlobalConfig_v1",
 		Promocodes = "BridgeDefense_Promocodes_v1",
 		LeaderboardXP = "BridgeDefense_LB_XP_v1",
 		LeaderboardWaves = "BridgeDefense_LB_Waves_v1",
+
+		AutoSaveInterval = 60,
+		SessionLockTTL = 120,
+		SessionHeartbeatInterval = 45,
+		MaxLoadRetries = 8,
+		MaxSaveRetries = 5,
+		-- true только для локальной миграции Studio → DataStore; не production
+		AllowLegacyStudioFallback = false,
 	},
 
 	-- Имена точек на карте (Folder Workspace.MapPoints)

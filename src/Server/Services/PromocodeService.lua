@@ -49,19 +49,20 @@ function PromocodeService:Init(services)
 				return { success = false, error = "Invalid code" }
 			end
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false }
 			end
 			if profile.UsedPromocodes[code] then
 				return { success = false, error = "Already used" }
 			end
 			profile.UsedPromocodes[code] = os.time()
+			DataService.MarkDirty(player, "Promocode")
 			if def.Type == "Gold" then
 				DataService.AddGold(player, def.Amount or 0, "promo")
 			elseif def.Type == "XP" then
 				DataService.AddXP(player, def.Amount or 0, "promo")
 			end
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "Promocode")
 			return { success = true }
 		end
 	end

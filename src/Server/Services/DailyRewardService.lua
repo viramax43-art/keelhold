@@ -15,7 +15,7 @@ function DailyRewardService:Init(services)
 	if claim then
 		claim.OnServerInvoke = function(player)
 			local profile = DataService.GetProfile(player)
-			if not profile then
+			if not profile or not DataService.IsProfileLoaded(player) then
 				return { success = false }
 			end
 			local now = os.time()
@@ -32,9 +32,10 @@ function DailyRewardService:Init(services)
 			local reward = GameConfig.DailyRewards[streak] or GameConfig.DailyRewards[1]
 			profile.DailyReward.LastClaimTime = now
 			profile.DailyReward.StreakDay = streak
+			DataService.MarkDirty(player, "DailyReward")
 			DataService.AddGold(player, reward.Gold or 0, "daily")
 			DataService.AddXP(player, reward.XP or 0, "daily")
-			DataService.SaveProfile(player, true)
+			DataService.SaveProfile(player, true, true, "DailyReward")
 			return { success = true, streak = streak, reward = reward }
 		end
 	end
