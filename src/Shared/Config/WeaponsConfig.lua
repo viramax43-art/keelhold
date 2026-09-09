@@ -5,6 +5,34 @@
 local WeaponsConfig = {
 	Types = { "Pistol", "Revolver", "SMG", "Rifle", "Shotgun", "LMG", "Sniper", "Crossbow" },
 
+	Icons = {
+		Pistol = { Image = "rbxassetid://0", Emoji = "🔫", Color = Color3.fromRGB(180, 180, 190) },
+		Revolver = { Image = "rbxassetid://0", Emoji = "🔫", Color = Color3.fromRGB(200, 160, 100) },
+		SMG = { Image = "rbxassetid://0", Emoji = "💨", Color = Color3.fromRGB(100, 200, 255) },
+		Rifle = { Image = "rbxassetid://0", Emoji = "🎯", Color = Color3.fromRGB(120, 220, 120) },
+		Shotgun = { Image = "rbxassetid://0", Emoji = "💥", Color = Color3.fromRGB(255, 140, 60) },
+		LMG = { Image = "rbxassetid://0", Emoji = "⚡", Color = Color3.fromRGB(255, 220, 80) },
+		Sniper = { Image = "rbxassetid://0", Emoji = "🔭", Color = Color3.fromRGB(200, 120, 255) },
+		Crossbow = { Image = "rbxassetid://0", Emoji = "🏹", Color = Color3.fromRGB(160, 120, 80) },
+	},
+	TierColors = {
+		[1] = Color3.fromRGB(160, 160, 170),
+		[2] = Color3.fromRGB(80, 200, 120),
+		[3] = Color3.fromRGB(80, 140, 255),
+		[4] = Color3.fromRGB(200, 100, 255),
+		[5] = Color3.fromRGB(255, 190, 60),
+		-- Элитные (престиж) тиры
+		[6] = Color3.fromRGB(255, 120, 120),
+		[7] = Color3.fromRGB(255, 90, 160),
+		[8] = Color3.fromRGB(170, 240, 255),
+		[9] = Color3.fromRGB(140, 255, 170),
+		[10] = Color3.fromRGB(255, 255, 255),
+	},
+
+	-- Элитные тиры: T6+ требуют очков престижа (PrestigeRequired = tier - 5)
+	MaxTier = 10,
+	PrestigeTierStart = 6,
+
 	Weapons = {
 		Pistol = {
 			[1] = { Name = "Glock T1", GoldCost = 0, Damage = 18, FireRate = 0.45, Range = 80, Accuracy = 0.85 },
@@ -75,5 +103,38 @@ local WeaponsConfig = {
 		Crossbow = 0,
 	},
 }
+
+-- Генерация элитных тиров T6–T10 из T5: урон/цена растут, тир открывается престижем.
+-- Модель тайкуна: после "ребёрса" открывается следующий этаж с заметно лучшим оружием.
+local ELITE_DAMAGE_GROWTH = 1.22 -- +22% урона за тир
+local ELITE_COST_GROWTH = 2.6 -- цена x2.6 за тир
+local ELITE_FIRERATE_IMPROVE = 0.97 -- -3% интервала за тир
+local ELITE_RANGE_GROWTH = 1.04
+
+for weaponType, tiers in pairs(WeaponsConfig.Weapons) do
+	local t5 = tiers[5]
+	if t5 then
+		for tier = 6, WeaponsConfig.MaxTier do
+			local prev = tiers[tier - 1]
+			tiers[tier] = {
+				Name = (t5.Name:gsub(" T5", "")) .. " Elite T" .. tier,
+				GoldCost = math.floor(prev.GoldCost * ELITE_COST_GROWTH / 100) * 100,
+				Damage = math.floor(prev.Damage * ELITE_DAMAGE_GROWTH),
+				FireRate = math.max(0.03, prev.FireRate * ELITE_FIRERATE_IMPROVE),
+				Range = math.floor(prev.Range * ELITE_RANGE_GROWTH),
+				Accuracy = math.min(0.99, prev.Accuracy + 0.005),
+				PrestigeRequired = tier - WeaponsConfig.PrestigeTierStart + 1,
+			}
+		end
+	end
+end
+
+-- Сколько престижа нужно для тира (0 для обычных)
+function WeaponsConfig.GetPrestigeRequired(tier: number): number
+	if tier < WeaponsConfig.PrestigeTierStart then
+		return 0
+	end
+	return tier - WeaponsConfig.PrestigeTierStart + 1
+end
 
 return WeaponsConfig

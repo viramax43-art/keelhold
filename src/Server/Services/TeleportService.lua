@@ -36,6 +36,9 @@ end
 
 function TeleportService.StartBattle(player: Player)
 	Log.Write("Battle", "StartBattle called by " .. player.Name)
+	if WaveService and WaveService.IsBattleBusy and WaveService.IsBattleBusy() then
+		return { success = false, error = "Предыдущий бой ещё завершается" }
+	end
 	if battleCooldown[player.UserId] and tick() - battleCooldown[player.UserId] < 5 then
 		return { success = true, silent = true }
 	end
@@ -88,21 +91,36 @@ function TeleportService.StartBattle(player: Player)
 			end
 		end
 	end
-	pcall(function()
+	local teleportOk, teleportError = pcall(function()
 		TeleportServiceRoblox:TeleportToPrivateServer(battlePlaceId, code, players, nil, teleportData)
 	end)
+	if not teleportOk then
+		Log.Write("Battle", "Teleport failed: " .. tostring(teleportError), "ERROR")
+		return { success = false, error = "Телепорт не удался" }
+	end
 	return { success = true, message = "Телепорт..." }
 end
 
 function TeleportService.ReturnToLobby(player: Player)
+	-- В активном бою EndBattle сам чистит врагов/ботов и возвращает в лобби
+	if WaveService and WaveService.IsBattleBusy and WaveService.IsBattleBusy() then
+		pcall(function()
+			WaveService.EndBattle(false)
+		end)
+		return { success = true }
+	end
 	if StudioBattleService.CanUseLocalBattle() or (GameConfig.PlaceIds.Lobby or 0) == 0 then
 		StudioBattleService.ReturnToLobbyLocal({ player })
 		return { success = true }
 	end
 	local lobbyId = GameConfig.PlaceIds.Lobby
-	pcall(function()
+	local ok, err = pcall(function()
 		TeleportServiceRoblox:Teleport(lobbyId, player)
 	end)
+	if not ok then
+		Log.Write("Battle", "Return teleport failed: " .. tostring(err), "ERROR")
+		return { success = false, error = "Не удалось вернуться в лобби" }
+	end
 	return { success = true }
 end
 

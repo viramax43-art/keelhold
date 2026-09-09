@@ -23,12 +23,12 @@ function StudioBattleService.HoverSpawn(player: Player)
 	local char = player.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if hrp and spawn and spawn:IsA("BasePart") then
-		local hover = spawn.CFrame + Vector3.new(0, 12, 0)
-		hrp.Anchored = true
-		hrp.CFrame = hover
+		-- Teleport only. Flight is client-controlled — do NOT Anchor/PlatformStand.
+		hrp.Anchored = false
+		hrp.CFrame = spawn.CFrame + Vector3.new(0, 14, -10)
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
-			hum.PlatformStand = true
+			hum.PlatformStand = false
 		end
 		Log.Write("StudioBattle", "Hover spawn " .. player.Name)
 	end
@@ -60,8 +60,24 @@ function StudioBattleService.ReturnToLobbyLocal(players: { Player })
 		local char = player.Character
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if char then
+			char:SetAttribute("Spectator", false)
+			for _, d in ipairs(char:GetDescendants()) do
+				if d:IsA("BasePart") then
+					d.CanQuery = true
+					-- The battle explicitly enabled HRP collision for flight.
+					-- Roblox characters normally keep it non-collidable in lobby.
+					if d.Name == "HumanoidRootPart" then
+						d.CanCollide = false
+					end
+				end
+			end
+		end
 		if hum then
 			hum.PlatformStand = false
+			hum.AutoRotate = true
+			hum.MaxHealth = 100
+			hum.Health = 100
 		end
 		if hrp then
 			hrp.Anchored = false

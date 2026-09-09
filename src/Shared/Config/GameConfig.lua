@@ -99,8 +99,10 @@ local GameConfig = {
 	Battle = {
 		DefenseEngageRange = 350,
 		PlayerEngageRange = 350,
-		WaveStartDelay = 1.5,
-		EnemySpawnInterval = 0.6,
+		WaveStartDelay = 0.4,
+		EnemySpawnInterval = 0.22,
+		EnemyGroupSize = 4,
+		EnemyGroupGap = 0.75,
 	},
 
 	-- XP за уровень (экспоненциальный рост через XPPerLevelGrowth)
@@ -114,6 +116,8 @@ local GameConfig = {
 		BonusPerWave = 4, -- +N за каждый номер волны
 		-- Утешительный бонус при поражении = доля от бонуса за победу на этой волне
 		DefeatPercent = 0.25,
+		-- Чекпоинт-волна (каждая CheckpointInterval) даёт усиленную награду
+		CheckpointMult = 3,
 	},
 }
 

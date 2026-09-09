@@ -8,6 +8,7 @@ local ClientLog = require(ReplicatedStorage.Shared.Util.ClientLog)
 local CombatController = {}
 local inBattle = false
 local fireRemote = nil
+local inited = false
 
 local function getFire()
 	if fireRemote then
@@ -23,7 +24,14 @@ local function resolveTargetId(origin: Vector3?): string?
 	if not camera then
 		return nil
 	end
-	local mousePos = UserInputService:GetMouseLocation()
+	local mousePos
+	if UserInputService.TouchEnabled then
+		-- Mobile fire is an action button, not an aiming touch. Aim through
+		-- the center reticle instead of raycasting through the button itself.
+		mousePos = camera.ViewportSize * 0.5
+	else
+		mousePos = UserInputService:GetMouseLocation()
+	end
 	local unitRay = camera:ViewportPointToRay(mousePos.X, mousePos.Y)
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
@@ -108,21 +116,21 @@ local function tryFire()
 end
 
 function CombatController:Init()
+	if inited then
+		return
+	end
+	inited = true
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
 	if not remotes then
 		return
 	end
 
+	-- Игрок в бою не стреляет — только наблюдатель. Стреляют боты.
 	local started = remotes:FindFirstChild(RemoteNames.BattleStarted)
 	if started then
 		started.OnClientEvent:Connect(function()
-			inBattle = true
-			ClientLog.Write("Combat", "Battle started — fly + fire")
-			local char = Players.LocalPlayer.Character
-			local hum = char and char:FindFirstChildOfClass("Humanoid")
-			if hum then
-				hum.WalkSpeed = 24
-			end
+			inBattle = false
+			ClientLog.Write("Combat", "Battle started — observer (no player fire)")
 		end)
 	end
 	local ended = remotes:FindFirstChild(RemoteNames.BattleEnded)
@@ -131,24 +139,6 @@ function CombatController:Init()
 			inBattle = false
 		end)
 	end
-
-	UserInputService.InputBegan:Connect(function(input, gp)
-		if gp then
-			return
-		end
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.Space then
-			tryFire()
-		end
-	end)
-
-	task.spawn(function()
-		while true do
-			task.wait(0.12)
-			if inBattle and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
-				tryFire()
-			end
-		end
-	end)
 end
 
 return CombatController

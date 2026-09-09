@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
+local UIController = require(script.Parent.UIController)
 
 local AdminController = {}
 local panel = nil
@@ -65,10 +66,19 @@ local function ensurePanel(gui)
 	refresh.MouseButton1Click:Connect(function()
 		local remotes = ReplicatedStorage:FindFirstChild("Remotes")
 		local fn = remotes and remotes:FindFirstChild(RemoteNames.GetProfile)
-		if fn then
-			pcall(function()
-				fn:InvokeServer()
+		if fn and fn:IsA("RemoteFunction") then
+			local ok, profile = pcall(function()
+				return fn:InvokeServer()
 			end)
+			if ok and profile then
+				UIController.UpdateHUD(profile, true)
+				refresh.Text = "Profile updated"
+				task.delay(1, function()
+					if refresh.Parent then
+						refresh.Text = "Refresh profile"
+					end
+				end)
+			end
 		end
 	end)
 	return panel

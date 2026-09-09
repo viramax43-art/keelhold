@@ -67,13 +67,24 @@ function PromocodeService:Init(services)
 	end
 
 	function PromocodeService.SetCode(code, def)
-		codes[string.upper(code)] = def
+		if type(code) ~= "string" or type(def) ~= "table" then
+			return false
+		end
+		local normalized = string.upper(code:sub(1, AdminConfig.PromocodeMaxLength or 32))
+		if normalized == "" or (def.Type ~= "Gold" and def.Type ~= "XP") then
+			return false
+		end
+		codes[normalized] = {
+			Type = def.Type,
+			Amount = math.clamp(math.floor(tonumber(def.Amount) or 0), 0, 1000000),
+		}
 		local s = getStore()
 		if s then
 			pcall(function()
 				s:SetAsync("All", codes)
 			end)
 		end
+		return true
 	end
 
 	if RunService:IsServer() then

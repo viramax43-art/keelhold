@@ -7,7 +7,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local MapBind = require(ReplicatedStorage.Shared.Map.MapBind)
 local Log = require(ReplicatedStorage.Shared.Util.Log)
 
-task.wait(0.5)
+local readyDeadline = os.clock() + 20
+while game:GetAttribute("BridgeDefenseServerReady") ~= true and os.clock() < readyDeadline do
+	task.wait(0.1)
+end
+if game:GetAttribute("BridgeDefenseServerReady") ~= true then
+	Log.Write("BattlePlace", "Server services did not initialize in time", "ERROR")
+	return
+end
 local WaveService = require(game:GetService("ServerScriptService").Server.Services.WaveService)
 
 MapBind.EnsureBattlePoints()

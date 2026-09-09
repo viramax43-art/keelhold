@@ -17,9 +17,22 @@ function WaveScaling.EnemyStats(wave: number, difficultyMult: number)
 	local w = math.max(0, wave - 1)
 	local fireRate = base.FireRate * (1 + (scale.FireRate or 0) * w)
 	fireRate = math.max(EnemiesConfig.MinFireRate or 0.15, fireRate)
+
+	-- Бесконечный режим: после "эпохи" (20 волн) HP/урон растут экспоненциально,
+	-- чтобы линейная прокачка игрока не делала игру тривиальной.
+	local era = EnemiesConfig.EndlessEra or {}
+	local eraStart = era.StartWave or 20
+	local hpMult = 1 + (scale.HP or 0) * w
+	local dmgMult = 1 + (scale.Damage or 0) * w
+	if wave > eraStart then
+		local over = wave - eraStart
+		hpMult = hpMult * ((era.HPGrowth or 1.07) ^ over)
+		dmgMult = dmgMult * ((era.DamageGrowth or 1.03) ^ over)
+	end
+
 	return {
-		HP = base.HP * (1 + (scale.HP or 0) * w) * difficultyMult,
-		Damage = base.Damage * (1 + (scale.Damage or 0) * w) * difficultyMult,
+		HP = base.HP * hpMult * difficultyMult,
+		Damage = base.Damage * dmgMult * difficultyMult,
 		FireRate = fireRate,
 		Accuracy = math.clamp(base.Accuracy + (scale.Accuracy or 0) * w, 0.2, 0.95),
 		Armor = (base.Armor or 0) + (scale.Armor or 0) * w,

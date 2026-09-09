@@ -4,10 +4,18 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
 
 local WaveResultController = {}
+local inited = false
 
 local function showResult(gui, data)
 	data = data or {}
 	local success = data.success == true
+	local goldEarned = data.goldEarned or 0
+	local xpEarned = data.xpEarned or 0
+
+	local existing = gui:FindFirstChild("WaveResultModal")
+	if existing then
+		existing:Destroy()
+	end
 
 	local backdrop = Instance.new("Frame")
 	backdrop.Name = "WaveResultModal"
@@ -37,10 +45,10 @@ local function showResult(gui, data)
 	stroke.Parent = panel
 
 	local icon = Instance.new("TextLabel")
-	icon.Size = UDim2.new(1, 0, 0, 60)
+	icon.Size = UDim2.new(1, 0, 0, 50)
 	icon.BackgroundTransparency = 1
-	icon.Text = success and "OK" or "X"
-	icon.TextSize = 36
+	icon.Text = success and "✓" or "✕"
+	icon.TextSize = 40
 	icon.Font = Enum.Font.GothamBold
 	icon.TextColor3 = success and Color3.fromRGB(100, 255, 140) or Color3.fromRGB(255, 80, 80)
 	icon.ZIndex = 102
@@ -48,9 +56,9 @@ local function showResult(gui, data)
 
 	local title = Instance.new("TextLabel")
 	title.Size = UDim2.new(1, -20, 0, 36)
-	title.Position = UDim2.new(0, 10, 0, 65)
+	title.Position = UDim2.new(0, 10, 0, 52)
 	title.BackgroundTransparency = 1
-	title.Text = success and "ВОЛНА ПРОЙДЕНА!" or "СКВАД УНИЧТОЖЕН"
+	title.Text = success and "ВОЛНА ПРОЙДЕНА!" or "ПОРАЖЕНИЕ"
 	title.TextColor3 = success and Color3.fromRGB(100, 255, 140) or Color3.fromRGB(255, 80, 80)
 	title.Font = Enum.Font.GothamBold
 	title.TextScaled = true
@@ -59,7 +67,7 @@ local function showResult(gui, data)
 
 	local waveLabel = Instance.new("TextLabel")
 	waveLabel.Size = UDim2.new(1, 0, 0, 24)
-	waveLabel.Position = UDim2.new(0, 0, 0, 110)
+	waveLabel.Position = UDim2.new(0, 0, 0, 96)
 	waveLabel.BackgroundTransparency = 1
 	waveLabel.Text = "Волна: " .. tostring(data.wave or "?")
 	waveLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
@@ -68,25 +76,33 @@ local function showResult(gui, data)
 	waveLabel.ZIndex = 102
 	waveLabel.Parent = panel
 
-	if success then
-		local rewardLabel = Instance.new("TextLabel")
-		rewardLabel.Size = UDim2.new(1, 0, 0, 28)
-		rewardLabel.Position = UDim2.new(0, 0, 0, 140)
-		rewardLabel.BackgroundTransparency = 1
-		rewardLabel.Text = string.format("+%d золота    +%d опыта", data.goldEarned or 0, data.xpEarned or 0)
-		rewardLabel.TextColor3 = Color3.fromRGB(255, 215, 80)
-		rewardLabel.Font = Enum.Font.GothamBold
-		rewardLabel.TextSize = 16
-		rewardLabel.ZIndex = 102
-		rewardLabel.Parent = panel
-	end
+	local rewardLabel = Instance.new("TextLabel")
+	rewardLabel.Size = UDim2.new(1, -16, 0, 32)
+	rewardLabel.Position = UDim2.new(0, 8, 0, 128)
+	rewardLabel.BackgroundTransparency = 1
+	rewardLabel.Text = string.format("Получено:  +%d золота    +%d опыта", goldEarned, xpEarned)
+	rewardLabel.TextColor3 = Color3.fromRGB(255, 215, 80)
+	rewardLabel.Font = Enum.Font.GothamBold
+	rewardLabel.TextSize = 16
+	rewardLabel.ZIndex = 102
+	rewardLabel.Parent = panel
 
-	local targetH = success and 200 or 180
+	local hint = Instance.new("TextLabel")
+	hint.Size = UDim2.new(1, 0, 0, 20)
+	hint.Position = UDim2.new(0, 0, 0, 165)
+	hint.BackgroundTransparency = 1
+	hint.Text = success and "Следующая волна скоро..." or "Возврат в лобби..."
+	hint.TextColor3 = Color3.fromRGB(160, 165, 180)
+	hint.Font = Enum.Font.Gotham
+	hint.TextSize = 13
+	hint.ZIndex = 102
+	hint.Parent = panel
+
 	TweenService:Create(panel, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-		Size = UDim2.new(0, 340, 0, targetH),
+		Size = UDim2.new(0, 360, 0, 200),
 	}):Play()
 
-	task.delay(3, function()
+	task.delay(success and 3.2 or 2.2, function()
 		if not backdrop.Parent then
 			return
 		end
@@ -101,6 +117,10 @@ local function showResult(gui, data)
 end
 
 function WaveResultController:Init()
+	if inited then
+		return
+	end
+	inited = true
 	local remotes = ReplicatedStorage:WaitForChild("Remotes", 15)
 	if not remotes then
 		return
@@ -119,26 +139,59 @@ function WaveResultController:Init()
 
 	local waveUp = remotes:FindFirstChild(RemoteNames.WaveUpdated)
 	if waveUp then
+		local old = gui:FindFirstChild("WaveInfo")
+		if old then
+			old:Destroy()
+		end
 		local waveLabel = Instance.new("TextLabel")
 		waveLabel.Name = "WaveInfo"
-		waveLabel.Size = UDim2.new(0, 220, 0, 28)
-		waveLabel.Position = UDim2.new(0, 12, 0, 90)
-		waveLabel.BackgroundTransparency = 1
+		waveLabel.Size = UDim2.new(0, 280, 0, 28)
+		-- Справа сверху, чтобы не наползать на HUD золота/опыта
+		waveLabel.Position = UDim2.new(1, -292, 0, 12)
+		waveLabel.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+		waveLabel.BackgroundTransparency = 0.25
 		waveLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
 		waveLabel.Font = Enum.Font.Gotham
-		waveLabel.TextScaled = true
-		waveLabel.TextXAlignment = Enum.TextXAlignment.Left
+		waveLabel.TextSize = 14
+		waveLabel.TextXAlignment = Enum.TextXAlignment.Center
 		waveLabel.Text = ""
+		waveLabel.Visible = false
 		waveLabel.Parent = gui
+		local wc = Instance.new("UICorner")
+		wc.CornerRadius = UDim.new(0, 8)
+		wc.Parent = waveLabel
+
+		local remotesFolder = remotes
+		local started = remotesFolder:FindFirstChild(RemoteNames.BattleStarted)
+		local ended = remotesFolder:FindFirstChild(RemoteNames.BattleEnded)
+		if started then
+			started.OnClientEvent:Connect(function()
+				waveLabel.Visible = true
+			end)
+		end
+		if ended then
+			ended.OnClientEvent:Connect(function()
+				waveLabel.Visible = false
+				waveLabel.Text = ""
+			end)
+		end
+
 		waveUp.OnClientEvent:Connect(function(info)
-			if info then
-				waveLabel.Text = string.format(
-					"Wave %s | Enemies %s | Bots %s",
-					tostring(info.Wave),
-					tostring(info.EnemiesAlive),
-					tostring(info.BotsAlive)
-				)
+			if not info then
+				return
 			end
+			if info.InMission == false then
+				waveLabel.Visible = false
+				waveLabel.Text = ""
+				return
+			end
+			waveLabel.Visible = true
+			waveLabel.Text = string.format(
+				"Волна %s  |  Враги %s  |  Боты %s",
+				tostring(info.Wave),
+				tostring(info.EnemiesAlive),
+				tostring(info.BotsAlive)
+			)
 		end)
 	end
 end

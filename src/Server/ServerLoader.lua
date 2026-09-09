@@ -25,6 +25,7 @@ function ServerLoader.Load()
 	local WaveService = require(servicesFolder.WaveService)
 	local StudioBattleService = require(servicesFolder.StudioBattleService)
 	local TeleportService = require(servicesFolder.TeleportService)
+	local TestTeleportService = require(servicesFolder.TestTeleportService)
 
 	local services = {
 		RemoteService = RemoteService,
@@ -45,6 +46,7 @@ function ServerLoader.Load()
 		WaveService = WaveService,
 		StudioBattleService = StudioBattleService,
 		TeleportService = TeleportService,
+		TestTeleportService = TestTeleportService,
 	}
 
 	RemoteService:Init(services)
@@ -65,6 +67,7 @@ function ServerLoader.Load()
 	WaveService:Init(services)
 	StudioBattleService:Init(services)
 	TeleportService:Init(services)
+	TestTeleportService:Init(services)
 
 	print("[BridgeDefense] Server services loaded OK")
 	return services

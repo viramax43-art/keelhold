@@ -17,39 +17,19 @@ roblox_game/
     └── Battle/             # Place-специфичный код боя
 ```
 
-## Быстрый старт (Roblox Studio + Rojo)
+**Как установить и запустить — см. [INSTALL.md](INSTALL.md) (для заказчика).**
 
-### 1. Установка инструментов
+## Быстрый старт (Windows)
 
 ```powershell
-# Aftman (менеджер инструментов)
-# https://github.com/LPGhatguy/aftman — установите, затем:
-aftman install
-
-# Или установите Rojo вручную: https://github.com/rojo-rbx/rojo
-```
-
-### 2. Сборка place'ов
-
-Используется **только заказная карта** (`Commission_place`). Старая procedural-карта удалена.
-
-**Быстрый запуск (рекомендуется):**
-```powershell
-cd c:\Users\armian\Desktop\Works\Freelance\roblox_game
+.\install-tools.ps1
 .\open-studio.ps1
 ```
-Откроется `BridgeDefense_Commission.rbxl` + Rojo serve.
 
-**Вручную:**
-```powershell
-rojo build lobby.project.json -o BridgeDefense_Commission.rbxl
-rojo serve lobby.project.json
-```
+Откроется Studio с `BridgeDefense_Commission.rbxl` — сразу **F5**. Rojo Connect в этом режиме не нужен.
 
-**Бой (отдельный place, продакшен):**
-```powershell
-rojo serve battle.project.json
-```
+Для live-синка кода: `.\open-studio.ps1 -Live` → Plugins → Rojo → Connect.
+
 
 ### 3. Публикация
 

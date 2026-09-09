@@ -14,6 +14,7 @@ local MapBind = {}
 
 local BOUND_ATTR = "BridgeDefenseZone"
 local PROMPT_NAME = "BridgeDefensePrompt"
+local PROMPT_ANCHOR_NAME = "BridgeDefensePromptAnchor"
 
 -- Кэш ориентации обороны на мосту (look = к врагам)
 local defenseLook = Vector3.new(1, 0, 0)
@@ -109,14 +110,15 @@ end
 
 local function pickInstance(cfg, spawnPos: Vector3, used: { [Instance]: boolean }): Instance?
 	local requireClass = cfg.RequireClass
+	local allowReuse = cfg.AllowReuse == true
 	local candidates = {}
 
 	local function addNamed(names)
 		for _, name in ipairs(names or {}) do
 			for _, inst in ipairs(collectByName(name, requireClass)) do
-				if not used[inst] then
+				if allowReuse or not used[inst] then
 					local part = getAnchorPart(inst)
-					if part and not used[part] then
+					if part and (allowReuse or not used[part]) then
 						table.insert(candidates, inst)
 					end
 				end
@@ -149,13 +151,176 @@ local function pickInstance(cfg, spawnPos: Vector3, used: { [Instance]: boolean 
 	return candidates[1]
 end
 
-local function attachPrompt(part: BasePart, zoneType: string, cfg)
-	local old = part:FindFirstChild(PROMPT_NAME)
-	if old then
-		old:Destroy()
+-- WoodSign сидит наверху WoodenLeaderboard — поднимаемся к именной модели-пропу
+local function getPropRoot(inst: Instance): Instance
+	local current = inst
+	for _ = 1, 4 do
+		local parent = current.Parent
+		if not (parent and parent:IsA("Model")) then
+			break
+		end
+		if parent.Name == "Model" or parent.Name == "CommissionMap" then
+			break
+		end
+		current = parent
 	end
-	part:SetAttribute("ZoneType", zoneType)
-	part:SetAttribute(BOUND_ATTR, true)
+	return current
+end
+
+local function partWorldMinY(p: BasePart): number
+	local cf = p.CFrame
+	local half = p.Size * 0.5
+	local minY = math.huge
+	for _, sx in ipairs({ -1, 1 }) do
+		for _, sy in ipairs({ -1, 1 }) do
+			for _, sz in ipairs({ -1, 1 }) do
+				local world = cf * Vector3.new(half.X * sx, half.Y * sy, half.Z * sz)
+				minY = math.min(minY, world.Y)
+			end
+		end
+	end
+	return minY
+end
+
+local function worldBottomCenter(source: Instance): Vector3
+	local minY = math.huge
+	local sumX, sumZ, n = 0, 0, 0
+	local function consider(p: BasePart)
+		if string.find(p.Name, "BridgeDefensePromptAnchor", 1, true) == 1 then
+			return
+		end
+		minY = math.min(minY, partWorldMinY(p))
+		sumX += p.Position.X
+		sumZ += p.Position.Z
+		n += 1
+	end
+	if source:IsA("BasePart") then
+		consider(source)
+	end
+	for _, d in ipairs(source:GetDescendants()) do
+		if d:IsA("BasePart") then
+			consider(d)
+		end
+	end
+	if n == 0 then
+		local cf = getCFrame(source)
+		return cf and cf.Position or Vector3.zero
+	end
+	local pos = Vector3.new(sumX / n, minY + 1.4, sumZ / n)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { source }
+	local hit = workspace:Raycast(pos + Vector3.new(0, 12, 0), Vector3.new(0, -80, 0), params)
+	if hit then
+		return Vector3.new(pos.X, hit.Position.Y + 1.5, pos.Z)
+	end
+	return pos
+end
+
+local function cleanupDetachedPromptHosts()
+	local folder = workspace:FindFirstChild("BridgeDefensePromptHosts")
+	if folder then
+		folder:Destroy()
+	end
+end
+
+-- Якорь у низа модели (Streaming: внутри той же Model, Atomic)
+local function ensurePromptHost(part: BasePart, source: Instance, cfg): BasePart
+	if not cfg.PromptAtBase then
+		return part
+	end
+
+	local leftover = part:FindFirstChild(PROMPT_NAME, true)
+	if leftover then
+		leftover:Destroy()
+	end
+	part:SetAttribute("ZoneType", nil)
+	part:SetAttribute(BOUND_ATTR, nil)
+
+	local root = getPropRoot(source)
+	if root:IsA("Model") then
+		pcall(function()
+			root.ModelStreamingMode = Enum.ModelStreamingMode.Atomic
+		end)
+	end
+
+	local anchorName = cfg.PromptAnchorName or PROMPT_ANCHOR_NAME
+	local parent: Instance = if root:IsA("Model") then root else part
+	local host = parent:FindFirstChild(anchorName)
+	if not (host and host:IsA("BasePart")) then
+		if host then
+			host:Destroy()
+		end
+		host = Instance.new("Part")
+		host.Name = anchorName
+		host.Size = Vector3.new(6, 1, 6)
+		host.Anchored = true
+		host.CanCollide = false
+		host.CanQuery = true
+		host.CanTouch = false
+		host.CastShadow = false
+		host.Massless = true
+		host.Transparency = 1
+		host.Parent = parent
+	else
+		host.CanQuery = true
+		host.CanCollide = false
+		host.Anchored = true
+		host.Size = Vector3.new(6, 1, 6)
+		host.Transparency = 1
+	end
+
+	local base = worldBottomCenter(root)
+	if cfg.PromptWorldOffset then
+		base += cfg.PromptWorldOffset
+	end
+	-- Чуть выше земли — как у Shop-падов (~Y+1)
+	host.CFrame = CFrame.new(base + Vector3.new(0, 0.6, 0))
+	return host
+end
+
+local function exclusivityFromCfg(cfg)
+	local v = cfg and cfg.PromptExclusivity
+	if v == "AlwaysShow" then
+		return Enum.ProximityPromptExclusivity.AlwaysShow
+	end
+	if v == "OnePerHost" then
+		return Enum.ProximityPromptExclusivity.OnePerHost
+	end
+	return Enum.ProximityPromptExclusivity.OnePerButton
+end
+
+local function attachPrompt(part: BasePart, zoneType: string, cfg, source: Instance?)
+	local origin = source or part
+	local host = ensurePromptHost(part, origin, cfg)
+	for _, old in ipairs(host:GetDescendants()) do
+		if old:IsA("ProximityPrompt") or (old:IsA("Attachment") and old.Name == "BridgeDefensePromptAtt") then
+			old:Destroy()
+		end
+	end
+	local directOld = host:FindFirstChild(PROMPT_NAME)
+	if directOld then
+		directOld:Destroy()
+	end
+	if part ~= host then
+		local leftover = part:FindFirstChild(PROMPT_NAME, true)
+		if leftover then
+			leftover:Destroy()
+		end
+		for _, child in ipairs(part:GetChildren()) do
+			if child:IsA("ProximityPrompt") then
+				child.Enabled = false
+			end
+		end
+	end
+	host:SetAttribute("ZoneType", zoneType)
+	host:SetAttribute(BOUND_ATTR, true)
+
+	-- Attachment: стабильнее для ProximityPrompt UI (центр хоста)
+	local att = Instance.new("Attachment")
+	att.Name = "BridgeDefensePromptAtt"
+	att.Position = Vector3.new(0, 1.2, 0)
+	att.Parent = host
 
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.Name = PROMPT_NAME
@@ -164,10 +329,13 @@ local function attachPrompt(part: BasePart, zoneType: string, cfg)
 	prompt.HoldDuration = 0
 	prompt.MaxActivationDistance = cfg.MaxDistance or 20
 	prompt.RequiresLineOfSight = false
+	prompt.Exclusivity = exclusivityFromCfg(cfg)
 	prompt.KeyboardKeyCode = Enum.KeyCode.E
 	prompt.GamepadKeyCode = Enum.KeyCode.ButtonX
-	prompt.Parent = part
-	return prompt
+	prompt.Style = Enum.ProximityPromptStyle.Default
+	prompt.Enabled = true
+	prompt.Parent = att
+	return prompt, host
 end
 
 function MapBind.IsCommissionMap(): boolean
@@ -184,14 +352,40 @@ end
 
 function MapBind.DisableEmbeddedMapScripts()
 	local n = 0
+
+	-- Карта заказчика: Teleports/MainTeleport ↔ Island* — петля Touched → Gameplay Paused.
+	-- CanTouch=false гасит уже подключённые Touched; скрипты уничтожаем.
+	local teleports = workspace:FindFirstChild("Teleports")
+	if teleports then
+		for _, inst in ipairs(teleports:GetDescendants()) do
+			if inst:IsA("BasePart") then
+				inst.CanTouch = false
+			elseif inst:IsA("Script") or inst:IsA("LocalScript") then
+				inst:Destroy()
+				n += 1
+			end
+		end
+		Log.Write("Map", "Neutralized commission Teleports pads (" .. n .. " scripts removed)")
+	end
+
+	-- Legacy SSS.Script: PlayerData.Island для тех падов (не Rojo)
+	local sss = game:GetService("ServerScriptService")
+	for _, child in ipairs(sss:GetChildren()) do
+		if child:IsA("Script") and child.Name == "Script" and child.Parent == sss then
+			child:Destroy()
+			n += 1
+			Log.Write("Map", "Removed legacy SSS island assigner")
+		end
+	end
+
 	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("Script") and inst.Enabled then
+		if inst:IsA("Script") and inst.Enabled and inst:GetAttribute("BridgeDefenseDisable") == true then
 			inst.Enabled = false
 			n += 1
 		end
 	end
 	if n > 0 then
-		Log.Write("Map", "Disabled " .. n .. " embedded Workspace scripts")
+		Log.Write("Map", "Embedded cleanup done, touched=" .. tostring(n))
 	end
 end
 
@@ -199,6 +393,7 @@ function MapBind.BindLobbyAnchors(): { BasePart }
 	local spawnPos = findSpawnPosition()
 	local boundParts = {}
 	local used: { [Instance]: boolean } = {}
+	cleanupDetachedPromptHosts()
 
 	-- Три Shop-пада на земле: 1=оружие, 2=броня, 3=юниты (явный порядок)
 	local shopPads = collectByName("Shop", "BasePart")
@@ -209,19 +404,24 @@ function MapBind.BindLobbyAnchors(): { BasePart }
 		{ zoneType = "UnitShop", cfg = CommissionMapConfig.Anchors.UnitShop, inst = shopPads[3] or shopPads[2] or shopPads[1] },
 	}
 	for _, bind in ipairs(shopBindings) do
-		local part = bind.inst and getAnchorPart(bind.inst)
+		local inst = bind.inst
+		local part = inst and getAnchorPart(inst)
+		if not part or (inst and used[inst]) or (part and used[part]) then
+			inst = pickInstance(bind.cfg, spawnPos, used)
+			part = inst and getAnchorPart(inst)
+		end
 		if part and bind.cfg and not used[part] then
-			used[bind.inst] = true
+			used[inst] = true
 			used[part] = true
-			attachPrompt(part, bind.zoneType, bind.cfg)
-			table.insert(boundParts, part)
-			local cf = getCFrame(part)
+			local _prompt, host = attachPrompt(part, bind.zoneType, bind.cfg, inst)
+			table.insert(boundParts, host or part)
+			local cf = getCFrame(host or part)
 			Log.Write(
 				"Map",
 				string.format(
 					"Anchor %s -> %s @ %s",
 					bind.zoneType,
-					part:GetFullName(),
+					(host or part):GetFullName(),
 					cf and tostring(cf.Position) or "?"
 				)
 			)
@@ -241,12 +441,17 @@ function MapBind.BindLobbyAnchors(): { BasePart }
 			if part then
 				used[inst] = true
 				used[part] = true
-				attachPrompt(part, zoneType, cfg)
-				table.insert(boundParts, part)
-				local cf = getCFrame(part)
+				local _prompt, host = attachPrompt(part, zoneType, cfg, inst)
+				table.insert(boundParts, host or part)
+				local cf = getCFrame(host or part)
 				Log.Write(
 					"Map",
-					string.format("Anchor %s -> %s @ %s", zoneType, part:GetFullName(), cf and tostring(cf.Position) or "?")
+					string.format(
+						"Anchor %s -> %s @ %s",
+						zoneType,
+						(host or part):GetFullName(),
+						cf and tostring(cf.Position) or "?"
+					)
 				)
 			else
 				Log.Write("Map", "Anchor missing for " .. zoneType, "WARN")
@@ -500,9 +705,9 @@ function MapBind.BindBattlePoints(): boolean
 		return Vector3.new(x, surfaceY(x, z) + 3.05, z)
 	end
 
-	-- Оборона ближе к «своему» краю, враги — с дальнего; строй пошире по настилу
+	-- Оборона ближе к «своему» краю; враги ближе, чтобы сразу вступали в перестрелку
 	local defenseT = defenseSign * 0.72
-	local enemyT = enemySign * 0.90
+	local enemyT = enemySign * 0.58
 	local dX, dZ = alongXZ(defenseT, 0)
 	local eX, eZ = alongXZ(enemyT, 0)
 	local flatDelta = Vector3.new(eX - dX, 0, eZ - dZ)
@@ -518,6 +723,7 @@ function MapBind.BindBattlePoints(): boolean
 	workspace:SetAttribute("CommissionAlongZ", defenseLook.Z)
 	workspace:SetAttribute("CommissionLateralX", bridgeLateral.X)
 	workspace:SetAttribute("CommissionLateralZ", bridgeLateral.Z)
+	workspace:SetAttribute("CommissionBridgeHalfWidth", math.max(8, (width or 20) * 0.45))
 
 	local laterals = { -width * 0.32, -width * 0.12, width * 0.12, width * 0.32 }
 	for i, spawnName in ipairs(names.DefenseSpawns) do

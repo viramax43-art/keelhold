@@ -11,13 +11,18 @@ local function safeInit(name)
 	end
 	local ok, ctrl = pcall(require, mod)
 	if ok and ctrl and ctrl.Init then
-		pcall(function()
+		local initOk, initError = pcall(function()
 			ctrl:Init()
 		end)
+		if not initOk then
+			warn(string.format("[BridgeDefense] %s init failed: %s", name, tostring(initError)))
+		end
+	elseif not ok then
+		warn(string.format("[BridgeDefense] %s require failed: %s", name, tostring(ctrl)))
 	end
 end
 
-safeInit("CombatController")
+-- Combat/Flight/Chat already initialized in ClientLoader
 safeInit("MobileController")
 safeInit("WaveResultController")
 safeInit("AdminController")

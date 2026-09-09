@@ -15,7 +15,7 @@ end
 function GlobalConfigService.SetWaveMode(endless: boolean, fixedCount: number?)
 	cfg.Endless = endless and true or false
 	if fixedCount then
-		cfg.FixedCount = fixedCount
+		cfg.FixedCount = math.clamp(math.floor(tonumber(fixedCount) or 20), 1, 500)
 	end
 	local ok, store = pcall(function()
 		return DataStoreService:GetDataStore(GameConfig.DataStore.GlobalConfig)
@@ -35,7 +35,10 @@ function GlobalConfigService:Init()
 		pcall(function()
 			local data = store:GetAsync("WaveMode")
 			if type(data) == "table" then
-				cfg = data
+				cfg = {
+					Endless = data.Endless == true,
+					FixedCount = math.clamp(math.floor(tonumber(data.FixedCount) or 20), 1, 500),
+				}
 			end
 		end)
 	end

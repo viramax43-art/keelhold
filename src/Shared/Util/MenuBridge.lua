@@ -8,10 +8,9 @@ local queue = {}
 
 function MenuBridge.SetHandler(fn)
 	handler = fn
-	if handler then
-		for _, tab in ipairs(queue) do
-			handler(tab)
-		end
+	if handler and #queue > 0 then
+		-- Only the latest requested modal can remain visible.
+		handler(queue[#queue])
 		table.clear(queue)
 	end
 end

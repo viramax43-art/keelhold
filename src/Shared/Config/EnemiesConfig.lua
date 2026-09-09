@@ -23,9 +23,19 @@ local EnemiesConfig = {
 
 	MinFireRate = 0.15,
 
+	-- Бесконечный режим: после StartWave враги растут экспоненциально
+	EndlessEra = {
+		StartWave = 20,
+		HPGrowth = 1.04, -- +4% HP за волну сверх линейного роста
+		DamageGrowth = 1.03, -- +3% урона за волну
+	},
+
 	Rewards = {
 		Gold = 12,
 		XP = 8,
+		-- Тайкун-модель: доход растёт с волной (+8% за волну, мягкий кап x6)
+		WaveGrowth = 0.08,
+		MaxWaveMult = 6,
 	},
 
 	WeaponRotation = { "Pistol", "SMG", "Rifle", "Shotgun", "LMG", "Sniper", "Revolver", "Crossbow" },
@@ -42,7 +52,7 @@ local EnemiesConfig = {
 	},
 
 	AttackRange = 180,
-	StopRange = 55,
+	StopRange = 42,
 }
 
 return EnemiesConfig

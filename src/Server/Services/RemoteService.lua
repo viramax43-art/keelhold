@@ -10,10 +10,15 @@ local folder = nil
 
 local FUNCTIONS = {
 	RemoteNames.GetProfile,
+	RemoteNames.ResetProfile,
 	RemoteNames.BuyWeapon,
 	RemoteNames.BuyArmor,
 	RemoteNames.UpgradeStat,
+	RemoteNames.PrestigeReset,
+	RemoteNames.Ascend,
 	RemoteNames.SetSquadLoadout,
+	RemoteNames.SetSquadArmor,
+	RemoteNames.ToggleWaveSpeed,
 	RemoteNames.RedeemPromocode,
 	RemoteNames.ClaimDailyReward,
 	RemoteNames.GetLeaderboard,
@@ -22,6 +27,7 @@ local FUNCTIONS = {
 	RemoteNames.PartyAction,
 	RemoteNames.StartBattle,
 	RemoteNames.ReturnToLobby,
+	RemoteNames.TestTeleport,
 	RemoteNames.GetDebugLogs,
 	RemoteNames.FireWeapon,
 }
@@ -29,6 +35,7 @@ local FUNCTIONS = {
 local EVENTS = {
 	RemoteNames.ProfileUpdated,
 	RemoteNames.PartyUpdated,
+	RemoteNames.PartyInvite,
 	RemoteNames.OpenMenuTab,
 	RemoteNames.BattleStarted,
 	RemoteNames.SubmitClientLog,

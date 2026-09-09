@@ -1,10 +1,25 @@
 -- Extract Commission map for Rojo (single top-level instances only)
+-- Prefer wider-bridge place (2); fall back to (1).
 local fs = require("@lune/fs")
 local roblox = require("@lune/roblox")
 local process = require("@lune/process")
 
 local projectRoot = process.cwd
-local placePath = projectRoot .. "/Commission_place (1).rbxl"
+local candidates = {
+	projectRoot .. "/Commission_place (2).rbxl",
+	projectRoot .. "/Commission_place (1).rbxl",
+}
+local placePath = nil
+for _, p in ipairs(candidates) do
+	if fs.isFile(p) then
+		placePath = p
+		break
+	end
+end
+if not placePath then
+	error("No Commission_place (2)/(1).rbxl in project root")
+end
+print("Using place:", placePath)
 local outDir = projectRoot .. "/map"
 fs.writeDir(outDir)
 

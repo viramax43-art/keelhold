@@ -12,17 +12,32 @@ local escConn = nil
 
 local COLORS = {
 	Backdrop = Color3.fromRGB(0, 0, 0),
-	BackdropAlpha = 0.65,
-	PanelBg = Color3.fromRGB(18, 20, 28),
-	PanelBorder = Color3.fromRGB(60, 70, 100),
-	HeaderBg = Color3.fromRGB(25, 28, 40),
-	TextPrimary = Color3.fromRGB(240, 240, 245),
-	Danger = Color3.fromRGB(220, 60, 60),
-	Accent = Color3.fromRGB(80, 140, 255),
+	BackdropAlpha = 0.7,
+	PanelBg = Color3.fromRGB(14, 16, 22),
+	PanelBorder = Color3.fromRGB(45, 52, 72),
+	HeaderBg = Color3.fromRGB(18, 21, 30),
+	TextPrimary = Color3.fromRGB(235, 238, 245),
+	Danger = Color3.fromRGB(230, 60, 70),
+	Accent = Color3.fromRGB(0, 170, 255),
 }
 
 function ModalManager.Init(screenGuiRef)
 	screenGui = screenGuiRef
+end
+
+function ModalManager.IsOpen(): boolean
+	return currentModal ~= nil and currentModal.Backdrop ~= nil and currentModal.Backdrop.Parent ~= nil
+end
+
+function ModalManager.GetScroll(): ScrollingFrame?
+	if not ModalManager.IsOpen() then
+		return nil
+	end
+	local scroll = currentModal.Scroll
+	if scroll and scroll.Parent then
+		return scroll
+	end
+	return nil
 end
 
 function ModalManager.Close()
@@ -36,21 +51,11 @@ function ModalManager.Close()
 	local panel = currentModal.Panel
 	local backdropRef = currentModal.Backdrop
 	currentModal = nil
-	if panel then
-		TweenService:Create(panel, TweenInfo.new(0.2, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {
-			Size = UDim2.new(0, 0, 0, 0),
-			BackgroundTransparency = 1,
-		}):Play()
-	end
+	-- Сразу убираем из дерева — иначе клики/ребилд бьют по «зомби»-модалке
 	if backdropRef then
-		TweenService:Create(backdropRef, TweenInfo.new(0.2), {
-			BackgroundTransparency = 1,
-		}):Play()
-		task.delay(0.25, function()
-			if backdropRef and backdropRef.Parent then
-				backdropRef:Destroy()
-			end
-		end)
+		backdropRef:Destroy()
+	elseif panel then
+		panel:Destroy()
 	end
 end
 
@@ -84,17 +89,30 @@ function ModalManager.Open(config)
 	panel.Size = UDim2.new(0, 0, 0, 0)
 	panel.BackgroundColor3 = COLORS.PanelBg
 	panel.BorderSizePixel = 0
+	panel.ClipsDescendants = true
 	panel.ZIndex = 51
 	panel.Parent = backdrop
 
 	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 12)
+	corner.CornerRadius = UDim.new(0, 6)
 	corner.Parent = panel
 
 	local stroke = Instance.new("UIStroke")
 	stroke.Color = COLORS.PanelBorder
 	stroke.Thickness = 1
 	stroke.Parent = panel
+
+	-- Акцентная полоса сверху панели
+	local topAccent = Instance.new("Frame")
+	topAccent.Name = "TopAccent"
+	topAccent.Size = UDim2.new(1, 0, 0, 2)
+	topAccent.BackgroundColor3 = COLORS.Accent
+	topAccent.BorderSizePixel = 0
+	topAccent.ZIndex = 54
+	topAccent.Parent = panel
+	local taCorner = Instance.new("UICorner")
+	taCorner.CornerRadius = UDim.new(0, 6)
+	taCorner.Parent = topAccent
 
 	local header = Instance.new("Frame")
 	header.Name = "Header"
@@ -105,7 +123,7 @@ function ModalManager.Open(config)
 	header.Parent = panel
 
 	local headerCorner = Instance.new("UICorner")
-	headerCorner.CornerRadius = UDim.new(0, 12)
+	headerCorner.CornerRadius = UDim.new(0, 6)
 	headerCorner.Parent = header
 
 	local headerFix = Instance.new("Frame")
@@ -115,6 +133,15 @@ function ModalManager.Open(config)
 	headerFix.BorderSizePixel = 0
 	headerFix.ZIndex = 52
 	headerFix.Parent = header
+
+	-- Тонкий разделитель под заголовком
+	local headerLine = Instance.new("Frame")
+	headerLine.Size = UDim2.new(1, 0, 0, 1)
+	headerLine.Position = UDim2.new(0, 0, 1, -1)
+	headerLine.BackgroundColor3 = COLORS.PanelBorder
+	headerLine.BorderSizePixel = 0
+	headerLine.ZIndex = 52
+	headerLine.Parent = header
 
 	local titleLabel = Instance.new("TextLabel")
 	titleLabel.Name = "Title"
@@ -133,16 +160,29 @@ function ModalManager.Open(config)
 	closeBtn.Name = "CloseBtn"
 	closeBtn.Size = UDim2.new(0, 32, 0, 32)
 	closeBtn.Position = UDim2.new(1, -42, 0, 8)
-	closeBtn.BackgroundColor3 = COLORS.Danger
+	closeBtn.BackgroundColor3 = Color3.fromRGB(35, 40, 55)
 	closeBtn.Text = "X"
-	closeBtn.TextColor3 = Color3.new(1, 1, 1)
+	closeBtn.TextColor3 = Color3.fromRGB(200, 205, 215)
 	closeBtn.Font = Enum.Font.GothamBold
-	closeBtn.TextSize = 16
+	closeBtn.TextSize = 14
 	closeBtn.ZIndex = 53
+	closeBtn.AutoButtonColor = false
 	closeBtn.Parent = header
 	local closeCorner = Instance.new("UICorner")
-	closeCorner.CornerRadius = UDim.new(0, 8)
+	closeCorner.CornerRadius = UDim.new(0, 4)
 	closeCorner.Parent = closeBtn
+	local closeStroke = Instance.new("UIStroke")
+	closeStroke.Color = COLORS.PanelBorder
+	closeStroke.Thickness = 1
+	closeStroke.Parent = closeBtn
+	closeBtn.MouseEnter:Connect(function()
+		closeBtn.BackgroundColor3 = COLORS.Danger
+		closeBtn.TextColor3 = Color3.new(1, 1, 1)
+	end)
+	closeBtn.MouseLeave:Connect(function()
+		closeBtn.BackgroundColor3 = Color3.fromRGB(35, 40, 55)
+		closeBtn.TextColor3 = Color3.fromRGB(200, 205, 215)
+	end)
 	closeBtn.MouseButton1Click:Connect(function()
 		ModalManager.Close()
 	end)
@@ -155,6 +195,7 @@ function ModalManager.Open(config)
 	scroll.ScrollBarThickness = 4
 	scroll.ScrollBarImageColor3 = COLORS.Accent
 	scroll.BorderSizePixel = 0
+	scroll.ClipsDescendants = true
 	scroll.ZIndex = 52
 	scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
 	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y

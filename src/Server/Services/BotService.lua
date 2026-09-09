@@ -32,6 +32,7 @@ local function createKit(slotIndex, position, stats, profile)
 		FacingCFrame = BotService.GetDefenseCFrame(position),
 		DisplayName = string.format("Спецназ-%d | %s", slotIndex, weaponType),
 		WeaponType = weaponType,
+		WeaponTier = stats.WeaponTier,
 		CurrentHP = stats.MaxHP,
 		MaxHP = stats.MaxHP,
 		IsBot = true,
@@ -63,6 +64,9 @@ local function buildRecord(model, slotIndex, stats, hostPlayer)
 		FireRate = stats.FireRate,
 		Range = CombatRange.GetDefenseEngageRange(stats.Range),
 		Accuracy = stats.Accuracy,
+		CritChance = stats.CritChance,
+		CritDamage = stats.CritDamage,
+		BotDamageMult = stats.BotDamageMult,
 		WeaponType = stats.WeaponType,
 		LastFire = 0,
 		IsBot = true,
@@ -74,27 +78,61 @@ end
 function BotService.StartBotAI(bot)
 	task.spawn(function()
 		while bot.Alive and bot.Model and bot.Model.Parent do
-			task.wait(0.15)
-			if not EnemyService or not bot.Root then
+			local speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
+			task.wait(0.15 / math.max(1, speedMult))
+			if not EnemyService or not bot.Root or not bot.Root.Parent then
 				continue
 			end
+			speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
 			local now = os.clock()
-			if now - (bot.LastFire or 0) < (bot.FireRate or 0.3) then
+			local fireCd = (bot.FireRate or 0.3) / math.max(1, speedMult)
+			if now - (bot.LastFire or 0) < fireCd then
 				continue
 			end
-			local target = EnemyService.FindNearestEnemy(bot.Root.Position, bot.Range or 200)
+			local standPos = bot.Root.Position
+			local range = bot.Range or 200
+			local target = EnemyService.PickRandomEnemy and EnemyService.PickRandomEnemy(standPos, range, bot.LockedTarget)
+				or EnemyService.FindNearestEnemy(standPos, range)
 			if not target or not target.Root then
+				bot.LockedTarget = nil
 				continue
 			end
+			bot.LockedTarget = target
 			bot.LastFire = now
-			local origin = bot.Root.Position + Vector3.new(0, 1.5, 0)
 			local aim = target.Root.Position + Vector3.new(0, 1, 0)
-			CombatVFX.PlayMuzzle(origin, aim)
+			local look = Vector3.new(aim.X - standPos.X, 0, aim.Z - standPos.Z)
+			if look.Magnitude > 0.1 then
+				CharacterRigBuilder.FaceInPlace(bot.Model, CFrame.lookAt(standPos, standPos + look.Unit))
+			end
+			local origin = bot.Root.Position + Vector3.new(0, 1.5, 0)
+			CharacterRigBuilder.PlayFireAnimation(bot.Model, aim)
 			if AccuracyHelper.RollHit(bot.Accuracy) then
-				EnemyService.DamageEnemy(target, bot.Damage or 10, bot.HostPlayer)
+				CombatVFX.PlayMuzzle(origin, aim)
+				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
+				if math.random() < (bot.CritChance or 0) then
+					damage = damage * math.max(1.5, bot.CritDamage or 1.5)
+				end
+				EnemyService.DamageEnemy(target, damage, bot.HostPlayer)
+			else
+				CombatVFX.PlayMiss(origin, aim)
 			end
 		end
 	end)
+end
+
+function BotService.HealAllBots()
+	local bots = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+	for _, bot in ipairs(bots) do
+		if bot.Alive and bot.Model and bot.Model.Parent then
+			bot.CurrentHP = bot.MaxHP or bot.CurrentHP
+			CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, bot.MaxHP)
+			local hum = bot.Model:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.MaxHealth = bot.MaxHP
+				hum.Health = bot.MaxHP
+			end
+		end
+	end
 end
 
 function BotService.DamageBot(bot, amount: number)
@@ -126,6 +164,11 @@ function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })
 	if not profile then
 		profile = Util.ReconcileProfile(nil, ProfileTemplate)
 	end
+	local statsProfile = profile
+	if GameConfig.BotsInheritHostUpgrades == false then
+		statsProfile = Util.DeepCopy(profile)
+		statsProfile.Upgrades = Util.DeepCopy(ProfileTemplate.Upgrades)
+	end
 
 	local botCount = GameConfig.DefenseBotCount or 4
 	local squad = workspace:FindFirstChild("Squad")
@@ -138,7 +181,7 @@ function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })
 	local spawnedBots = {}
 	for slotIndex = 1, botCount do
 		local pos = defensePositions[slotIndex] or defensePositions[1] or Vector3.new(0, 5, 0)
-		local stats = StatCalculator.BuildCombatStats(profile, slotIndex)
+		local stats = StatCalculator.BuildCombatStats(statsProfile, slotIndex)
 
 		local model = nil
 		local skin = "kit"
@@ -157,7 +200,14 @@ function BotService.SpawnBots(hostPlayer: Player, defensePositions: { Vector3 })
 		end
 
 		if model then
+			-- Для аватара facing уже с HipHeight; не сбрасываем PivotTo на «голую» точку слота
+			local facing = model:GetPivot()
+			if not model:GetAttribute("UsesPlayerSkin") then
+				facing = BotService.GetDefenseCFrame(pos)
+			end
+			CharacterRigBuilder.LockStanding(model, facing)
 			local bot = buildRecord(model, slotIndex, stats, hostPlayer)
+			bot.DefensePosition = facing.Position
 			table.insert(spawnedBots, bot)
 			BotService.StartBotAI(bot)
 			if WaveService and WaveService.RegisterBot then

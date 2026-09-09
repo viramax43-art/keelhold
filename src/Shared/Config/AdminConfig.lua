@@ -15,8 +15,6 @@ local AdminConfig = {
 	RewardTypes = {
 		Gold = "Gold",
 		XP = "XP",
-		XPMultiplier = "XPMultiplier", -- временный множитель опыта
-		GoldMultiplier = "GoldMultiplier",
 	},
 }
 
