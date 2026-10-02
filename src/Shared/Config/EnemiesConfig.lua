@@ -8,16 +8,16 @@ local EnemiesConfig = {
 	-- 0 брони у врага) убивал обычного врага за ~6 попаданий: 18 * 6 = 108.
 	BaseStats = {
 		HP = 108,
-		Damage = 13, -- ~7-8 попаданий по боту с 100 HP (до брони)
-		FireRate = 0.7, -- медленнее ботов: боты должны выигрывать перестрелку
+		Damage = 18, -- как у пистолета Glock T1 (18): «у врага оружие и дамаг такой же» по ТЗ
+		FireRate = 0.7, -- медленнее ботов (0.45): «надо ждать, когда попадёт»
 		Accuracy = 0.55, -- база (профиль стрелка ещё умножается в HitChance)
 		Armor = 0,
-		WalkSpeed = 12,
+		WalkSpeed = 14,
 	},
 
 	PerWaveScaling = {
-		HP = 0.12,
-		Damage = 0.035,
+		HP = 0.07, -- площе: волна 5 ~7-8 попаданий, а не «танк» на 9+
+		Damage = 0.02,
 		FireRate = -0.008,
 		Accuracy = 0.006,
 		Armor = 0.6,
@@ -49,7 +49,7 @@ local EnemiesConfig = {
 	-- Враги стреляют заметно хуже ботов: низкая Accuracy + высокий Spread.
 	-- DamageMult — множитель к BaseStats.Damage, FireRateMult — к BaseStats.FireRate.
 	EnemyWeapons = {
-		Pistol = { DamageMult = 0.85, Accuracy = 0.60, Spread = 0.30, Range = 90, FireRateMult = 1.00 },
+		Pistol = { DamageMult = 1.00, Accuracy = 0.60, Spread = 0.30, Range = 90, FireRateMult = 1.00 },
 		Revolver = { DamageMult = 1.10, Accuracy = 0.58, Spread = 0.32, Range = 95, FireRateMult = 1.20 },
 		SMG = { DamageMult = 0.60, Accuracy = 0.52, Spread = 0.46, Range = 70, FireRateMult = 0.35 },
 		Rifle = { DamageMult = 1.00, Accuracy = 0.62, Spread = 0.26, Range = 120, FireRateMult = 0.55 },
@@ -81,13 +81,15 @@ local EnemiesConfig = {
 	-- Линия атаки у обороны
 	StopRange = 16,
 	MeleeRange = 18,
-	-- Ближний бой всегда попадает — он должен быть наказанием, но не казнью
-	MeleeDamageMult = 1.1,
-	MeleeFireRate = 0.9,
+	-- Ближний бой всегда попадает — наказание, но не казнь.
+	-- База урона теперь 18 (как пистолет), поэтому множитель ниже 1.0,
+	-- чтобы удар в упор оставался ~14 урона, а не превращал поздние волны в wipe.
+	MeleeDamageMult = 0.80,
+	MeleeFireRate = 1.0,
 	-- Полосы моста + очередь атаки
 	LaneCount = 6,
 	MinSpacing = 5.5,
-	MaxAttackers = 4,
+	MaxAttackers = 3,
 	AttackSlotsPerLane = 1,
 	QueueSpacing = 5.5,
 	AttackSpacing = 4.5,

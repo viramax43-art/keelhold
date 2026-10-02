@@ -164,6 +164,7 @@ AdminUserIds = { 123456789 },
 | Проблема | Решение |
 |---|---|
 | Пустая карта / нет скриптов | Откройте `BridgeDefense_Commission.rbxl` или запустите `.\open-studio.ps1` |
+| Бой «сломан»: все попадают слишком часто/далеко | Это **устаревшая сборка без серверного модуля** (`src/Server`). Пересоберите через `.\open-studio.ps1` и проверьте, что в `ServerScriptService → Server` есть скрипты. Не открывайте боевой place напрямую — бой запускается кнопкой «Бой» из лобби |
 | Gold/XP сбрасываются | Запускайте через `.\open-studio.ps1`; в Studio включите HTTP + API Services |
 | «API Services» серое | Сначала Publish to Roblox, затем снова Game Settings |
 | Rojo Connect не коннектится | Должен работать `rojo serve`, порт `34872` свободен |

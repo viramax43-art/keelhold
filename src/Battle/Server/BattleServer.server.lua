@@ -12,7 +12,11 @@ while game:GetAttribute("BridgeDefenseServerReady") ~= true and os.clock() < rea
 	task.wait(0.1)
 end
 if game:GetAttribute("BridgeDefenseServerReady") ~= true then
-	Log.Write("BattlePlace", "Server services did not initialize in time", "ERROR")
+	-- Серверные сервисы (src/Server) не загрузились: сборка устарела или
+	-- место открыто без ServerScriptService. Без них бой не запустится.
+	Log.Write("BattlePlace", "Server services did not initialize in time — the Server module (src/Server) is missing or stale. Rebuild the place (open-studio.ps1) and try again.", "ERROR")
+	warn("[BridgeDefense] SERVER MODULE NOT LOADED — rebuild the place (open-studio.ps1) and make sure ServerScriptService.Server is present.")
+	game:SetAttribute("BridgeDefenseServerReady", false)
 	return
 end
 local WaveService = require(game:GetService("ServerScriptService").Server.Services.WaveService)
