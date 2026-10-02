@@ -6,6 +6,13 @@ local RemoteNames = require(ReplicatedStorage.Shared.Remotes.RemoteNames)
 local WaveResultController = {}
 local inited = false
 
+-- Ранг = номер «сотни» волн (100 волн = 1 ранг; всего 5 рангов в GameConfig.Waves).
+-- Значение приходит с сервера (info.Rank), здесь — тот же расчёт как фолбэк.
+local function rankForWave(wave: number): number
+	local w = tonumber(wave) or 1
+	return math.max(1, math.ceil(math.max(1, w) / 100))
+end
+
 local function showResult(gui, data)
 	data = data or {}
 	local success = data.success == true
@@ -69,7 +76,7 @@ local function showResult(gui, data)
 	waveLabel.Size = UDim2.new(1, 0, 0, 24)
 	waveLabel.Position = UDim2.new(0, 0, 0, 96)
 	waveLabel.BackgroundTransparency = 1
-	waveLabel.Text = "Волна: " .. tostring(data.wave or "?")
+	waveLabel.Text = string.format("Волна: %s  •  Ранг: %d", tostring(data.wave or "?"), rankForWave(data.wave))
 	waveLabel.TextColor3 = Color3.fromRGB(200, 200, 210)
 	waveLabel.Font = Enum.Font.Gotham
 	waveLabel.TextSize = 16
@@ -145,9 +152,9 @@ function WaveResultController:Init()
 		end
 		local waveLabel = Instance.new("TextLabel")
 		waveLabel.Name = "WaveInfo"
-		waveLabel.Size = UDim2.new(0, 280, 0, 28)
+		waveLabel.Size = UDim2.new(0, 340, 0, 28)
 		-- Справа сверху, чтобы не наползать на HUD золота/опыта
-		waveLabel.Position = UDim2.new(1, -292, 0, 12)
+		waveLabel.Position = UDim2.new(1, -352, 0, 12)
 		waveLabel.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
 		waveLabel.BackgroundTransparency = 0.25
 		waveLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
@@ -187,7 +194,8 @@ function WaveResultController:Init()
 			end
 			waveLabel.Visible = true
 			waveLabel.Text = string.format(
-				"Волна %s  |  Враги %s  |  Боты %s",
+				"Ранг %d  |  Волна %s  |  Враги %s  |  Боты %s",
+				tonumber(info.Rank) or rankForWave(info.Wave),
 				tostring(info.Wave),
 				tostring(info.EnemiesAlive),
 				tostring(info.BotsAlive)

@@ -34,10 +34,29 @@ local GameConfig = {
 	Waves = {
 		DefaultEndless = true,
 		DefaultFixedCount = 20, -- используется если Endless = false
-		InterWaveDelay = 8, -- секунд между волнами
-		EnemiesPerWaveBase = 12, -- базовое число врагов; растёт с волной
-		EnemiesPerWaveGrowth = 2, -- +N врагов за каждую волну
+		InterWaveDelay = 6, -- секунд между волнами (короче = плотнее темп)
+		-- Число врагов = EnemiesPerWaveBase + EnemiesPerWaveGrowth * (wave - 1),
+		-- но EnemiesPerWaveOverride ниже имеет приоритет (ручная подстройка).
+		EnemiesPerWaveBase = 4, -- волна 1 = 4 врага
+		EnemiesPerWaveGrowth = 1, -- +1 враг за волну: 4, 5, 6, 7, 8, ... до 100
 		MaxEnemiesPerWave = 100,
+		-- Структура прогрессии заказчика: 100 волн = 1 ранг, всего 5 рангов.
+		-- Ранги 2..5 повторяют волны 1..100, но враги сильнее (см. RankEnemy*).
+		-- После 5-го ранга (волна 500) включается бесконечный режим усиления.
+		WavesPerRank = 100,
+		RankCount = 5,
+		-- Скалирование врагов по рангу. Ранг 1 = 1.0 (текущий баланс не меняется).
+		RankEnemyHPGrowth = 0.35,
+		RankEnemyDamageGrowth = 0.20,
+		-- Ручная подстройка первых волн (1-5) — перебивает формулу.
+		-- Очистить ({}), чтобы вернуться к формуле base + growth.
+		EnemiesPerWaveOverride = {
+			[1] = 4,
+			[2] = 5,
+			[3] = 6,
+			[4] = 7,
+			[5] = 8,
+		},
 	},
 
 	-- Боты наследуют прокачку хоста (HP / точность / перезарядка)
@@ -106,16 +125,83 @@ local GameConfig = {
 
 	-- Бой на мосту: защитники стреляют по длине моста; враги идут по waypoints
 	Battle = {
-		DefenseEngageRange = 350,
-		PlayerEngageRange = 350,
+		-- Дистанция, с которой защитники открывают огонь. Дальность оружия
+		-- всё равно ограничивает сверху (CombatRange: weaponRange * 1.8).
+		DefenseEngageRange = 240,
+		PlayerEngageRange = 240,
 		WaveStartDelay = 0.4,
-		EnemySpawnInterval = 0.22,
-		EnemyGroupSize = 4,
-		EnemyGroupGap = 0.75,
-		-- Временно для диагностики урона (потом выключить)
-		DebugCombatDamage = true,
-		ForceBotHitsForTest = true,
-		ForceEnemyHitsForTest = true,
+		-- Темп спавна: interval между врагами внутри пачки, groupGap — пауза
+		-- между пачками по groupSize врагов.
+		EnemySpawnInterval = 0.5,
+		EnemyGroupSize = 3,
+		EnemyGroupGap = 1.2,
+
+		-- Диагностика боя: писать в лог каждый выстрел/урон (WARN). В проде false.
+		DebugCombatDamage = false,
+		-- Заглушки для теста урона: включать ТОЛЬКО чтобы проверить, что
+		-- урон вообще проходит (каждый выстрел с чистой линией = попадание).
+		ForceBotHitsForTest = false,
+		ForceEnemyHitsForTest = false,
+
+		-- Точность выстрела — одна кривая для ботов и врагов:
+		--   chance = (base + bonus) * ProfileMult - штраф_дистанции - штраф_движения
+		-- Боты — эталон (1.0), враги заметно хуже (0.8): стреляет толпа, но мажет.
+		HitChance = {
+			Enabled = true, -- false = старая (слишком щедрая) кривая, для сравнения
+			BotProfileMult = 1.0,
+			EnemyProfileMult = 0.8,
+			-- До этой доли дальности точность почти не падает (0.15 = 15% range)
+			NearFalloffStart = 0.15,
+			-- Форма падения: 1 = линейно, >1 = резкий обвал у предела дальности
+			FalloffPower = 1.35,
+			-- Макс. штраф дистанции на пределе дальности (в долях от шанса)
+			MaxDistancePenalty = 0.55,
+			-- Разброс оружия усиливает штраф: mult = SpreadBase + spread * SpreadWeight
+			SpreadBase = 0.55,
+			SpreadWeight = 0.85,
+			MovingShooterPenalty = 0.10,
+			MovingTargetPenalty = 0.07,
+			MinChance = 0.05,
+			MaxChance = 0.92,
+			-- Визуальный трассер: разброс только по горизонтали, вертикали нет.
+			-- (именно так просил заказчик: угол вбок, высота всегда ровно в цель)
+			HorizontalOnlySpread = true,
+			VisualSpreadMaxDeg = 5,
+			VisualSpreadMinDeg = 0.6,
+		},
+
+		-- Линия огня (LOS): части с Transparency >= порога не считаются укрытием.
+		-- У заказной карты у самой обороны стоит почти невидимая панель
+		-- (0.1x28x101, Transparency = 0.8), а поперёк моста — невидимая стена
+		-- (0.3x70x252, Transparency = 1): обе «съедали» выстрелы у ствола,
+		-- из-за чего боты и враги не наносили урона вообще.
+		LosGhostTransparency = 0.7,
+
+		-- Коридор боя: у невидимых деталей внутри зоны боя снимается коллизия,
+		-- чтобы они не держали NPC и не ловили пули (см. MapBind).
+		CorridorClear = {
+			Enabled = true,
+			-- Порог невидимости детали
+			Transparency = 0.7,
+			-- Запас вдоль моста от крайних точек пути врагов
+			AlongPad = 12,
+			-- Поперёк: ширина настила * 0.5 + запас
+			LateralPad = 2,
+			-- По высоте: от настила вниз Below и вверх Above (уровень груди)
+			Below = 3,
+			Above = 9,
+		},
+
+		-- «Раненый» вместо смерти: юнит падает, но не исчезает и не стреляет.
+		-- Встаёт сам через ReviveDelaySec с ReviveHPPercent от MaxHP.
+		-- Поражение (wipe) — только если ВСЕ боты одновременно Downed.
+		Downed = {
+			Enabled = true,
+			ReviveDelaySec = 12,
+			ReviveHPPercent = 0.35,
+			-- Между волнами все раненые встают (передышка)
+			ReviveOnWaveStart = true,
+		},
 		-- Debug VFX: workspace:SetAttribute("BD_DebugCombat", true)
 	},
 

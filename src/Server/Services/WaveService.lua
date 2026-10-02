@@ -59,6 +59,13 @@ function WaveService.GetCurrentWave(): number?
 	return battleState and battleState.Wave or nil
 end
 
+-- Номер ранга текущей волны (100 волн = 1 ранг). Используется HUD и скалированием.
+function WaveService.GetRank(): number
+	local per = math.max(1, (GameConfig.Waves and GameConfig.Waves.WavesPerRank) or 100)
+	local wave = (battleState and battleState.Wave) or 1
+	return math.max(1, math.ceil(math.max(1, wave) / per))
+end
+
 function WaveService.GetBots()
 	return battleState and battleState.Bots or {}
 end
@@ -141,12 +148,17 @@ local function alivePlayers(list)
 	return out
 end
 
-local function anyBotAlive()
+--[[
+	Есть ли бот, который ещё стоит в строю.
+	Раненый (Downed) лежит, но Alive остаётся true — он встанет сам, поэтому
+	wipe объявляется только когда ВСЕ боты одновременно лежат.
+]]
+local function anyBotStanding()
 	if not battleState then
 		return false
 	end
 	for _, b in ipairs(battleState.Bots) do
-		if b.Alive then
+		if b.Alive and not b.Downed then
 			return true
 		end
 	end
@@ -161,11 +173,21 @@ local function fireWaveUpdated()
 		or EnemyService.GetAliveCount()
 	RemoteService.FireAll(RemoteNames.WaveUpdated, {
 		Wave = battleState.Wave,
+		Rank = WaveService.GetRank(),
 		EnemiesAlive = enemiesDisplay,
 		BotsAlive = (function()
 			local n = 0
 			for _, b in ipairs(battleState.Bots) do
-				if b.Alive then
+				if b.Alive and not b.Downed then
+					n += 1
+				end
+			end
+			return n
+		end)(),
+		BotsDowned = (function()
+			local n = 0
+			for _, b in ipairs(battleState.Bots) do
+				if b.Alive and b.Downed then
 					n += 1
 				end
 			end
@@ -214,7 +236,7 @@ function WaveService.OnDefenderDied(_bot)
 		return
 	end
 	fireWaveUpdated()
-	if not anyBotAlive() then
+	if not anyBotStanding() then
 		Log.Write("Wave", "All defenders dead — squad wiped")
 		WaveService.OnWipe()
 	end
@@ -291,6 +313,7 @@ function WaveService.OnWipe()
 	end)
 	for _, bot in ipairs(battleState.Bots) do
 		bot.Alive = false
+		bot.Downed = false
 	end
 
 	local earnings = RewardService.GrantDefeatConsolation(players, wave) or {}

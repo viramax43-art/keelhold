@@ -8,6 +8,7 @@ local EnemiesConfig = require(ReplicatedStorage.Shared.Config.EnemiesConfig)
 local UpgradesConfig = require(ReplicatedStorage.Shared.Config.UpgradesConfig)
 local StatCalculator = require(ReplicatedStorage.Shared.Util.StatCalculator)
 local CoopMultiplier = require(ReplicatedStorage.Shared.Util.CoopMultiplier)
+local Log = require(ReplicatedStorage.Shared.Util.Log)
 
 local RewardService = {}
 local DataService
@@ -170,7 +171,10 @@ function RewardService.GrantWaveClear(players: { Player }, wave: number): { [num
 				end
 				DataService.MarkDirty(p, "WaveClear")
 				task.spawn(function()
-					DataService.FlushProfile(p, "WaveClear", false)
+					local ok, err = DataService.FlushProfile(p, "WaveClear", false)
+					if not ok then
+						Log.Write("Data", "Wave clear save failed: " .. tostring(err), "ERROR")
+					end
 				end)
 			end
 			perPlayer[p.UserId] = {

@@ -79,6 +79,8 @@ local function buildRecord(model, slotIndex, stats, hostPlayer)
 		IsBot = true,
 		HostPlayer = hostPlayer,
 		Alive = true,
+		-- Downed = раненый (лежит, не стреляет), Alive = в бою (см. DownBot)
+		Downed = false,
 	}
 end
 
@@ -91,11 +93,17 @@ function BotService.StartBotAI(bot)
 				continue
 			end
 			speedMult = (WaveService and WaveService.GetCombatSpeedMult and WaveService.GetCombatSpeedMult()) or 1
+			if bot.Downed then
+				-- Раненый лежит: не стреляет и не целится, ждёт подъёма
+				continue
+			end
 			local now = os.clock()
 			local fireCd = (bot.FireRate or 0.3) / math.max(1, speedMult)
 			local standPos = bot.Root.Position
 			local range = bot.Range or 200
 			local teammates = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+			-- Свои модели: союзник не должен блокировать LOS и ловить трассер
+			local allyModels = CombatVFX.CollectModels(teammates, bot.Model)
 			local target = EnemyService.PickTargetForDefender
 					and EnemyService.PickTargetForDefender(standPos, range, bot.LockedTarget, teammates, bot)
 				or EnemyService.FindNearestEnemy(standPos, range)
@@ -133,14 +141,23 @@ function BotService.StartBotAI(bot)
 				debugCombat(string.format("BOT_OUT_OF_RANGE bot=%s distance=%.1f range=%.1f", tostring(bot.Id), distance, range))
 			end
 
-			local losClear, losPos = true, aim
-			local losOk, losA, losB = pcall(function()
-				return CombatVFX.HasClearLos(origin, aim, range, bot.Model, target.Model)
+			local losClear, losPos, losBlock = true, aim, nil
+			local losOk, losA, losB, losC = pcall(function()
+				return CombatVFX.HasClearLos(origin, aim, range, bot.Model, target.Model, allyModels)
 			end)
 			if losOk then
-				losClear, losPos = losA, losB
+				losClear, losPos, losBlock = losA, losB, losC
 			else
 				losClear = true
+			end
+			if not losClear and losBlock then
+				debugCombat(string.format(
+					"BOT_LOS_BLOCKED bot=%s target=%s part=%s dist=%.1f",
+					tostring(bot.Id),
+					tostring(target.Id),
+					losBlock:GetFullName(),
+					(losBlock.Position - origin).Magnitude
+				))
 			end
 
 			local hit, chance, roll = false, 0, 1
@@ -152,6 +169,8 @@ function BotService.StartBotAI(bot)
 					spread = bot.Spread or 0.2,
 					movingShooter = false,
 					movingTarget = target.State == "Moving",
+					-- Боты — эталонный профиль (точнее врагов при той же дистанции)
+					profileMult = AccuracyHelper.GetProfileMult("bot"),
 				})
 			end
 			debugCombat(string.format(
@@ -170,6 +189,17 @@ function BotService.StartBotAI(bot)
 			if GameConfig.Battle and GameConfig.Battle.ForceBotHitsForTest then
 				hit = true
 			end
+
+			-- Визуальный разброс трассеров: только по горизонтали (вертикали нет).
+			local visualAim = aim
+			pcall(function()
+				visualAim = AccuracyHelper.SpreadAim(origin, aim, {
+					accuracy = bot.Accuracy,
+					spread = bot.Spread or 0.2,
+					distance = shotDistance,
+					maxRange = range,
+				})
+			end)
 
 			if hit then
 				local damage = (bot.Damage or 10) * (bot.BotDamageMult or 1)
@@ -203,21 +233,120 @@ function BotService.StartBotAI(bot)
 					))
 				end
 				pcall(function()
-					CombatVFX.PlayMuzzle(origin, aim, bot.Model, bot.WeaponType)
+					CombatVFX.PlayMuzzle(origin, visualAim, bot.Model, bot.WeaponType)
 				end)
 			else
 				pcall(function()
-					CombatVFX.PlayMiss(origin, if losClear then aim else losPos, bot.Model, bot.WeaponType, range)
+					CombatVFX.PlayMiss(
+						origin,
+						if losClear then visualAim else losPos,
+						bot.Model,
+						bot.WeaponType,
+						range,
+						allyModels
+					)
 				end)
 			end
 		end
 	end)
 end
 
+--[[
+	Раненый (Downed) вместо смерти.
+
+	Юнит падает на настил, не стреляет, враги его игнорируют
+	(EnemyService.UpdateBotPositionCache пропускает Downed). Встаёт сам через
+	GameConfig.Battle.Downed.ReviveDelaySec секунд с ReviveHPPercent от MaxHP.
+	Поражение (wipe) — только если ВСЕ боты одновременно лежат; между волнами
+	все встают (BotService.HealAllBots).
+]]
+function BotService.DownBot(bot)
+	if not bot or bot.Downed then
+		return false
+	end
+	local cfg = (GameConfig.Battle and GameConfig.Battle.Downed) or {}
+	local delay = math.max(1, cfg.ReviveDelaySec or 12)
+	local revivePercent = cfg.ReviveHPPercent or 0.35
+
+	bot.Downed = true
+	bot.DownedAt = os.clock()
+	bot.CurrentHP = 0
+	bot.LockedTarget = nil
+
+	if bot.Model and bot.Model.Parent then
+		CharacterRigBuilder.UpdateHealthBar(bot.Model, 0, bot.MaxHP or 100)
+		local humanoid = bot.Model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			-- Health = 0 убил бы риг и снял модель: держим минимальный запас
+			humanoid.MaxHealth = math.max(1, bot.MaxHP or 100)
+			humanoid.Health = 1
+		end
+		pcall(function()
+			CharacterRigBuilder.DownedPose(bot.Model)
+		end)
+	end
+
+	debugCombat(string.format("BOT_DOWNED id=%s reviveIn=%.0f", tostring(bot.Id), delay))
+	Log.Write("Wave", string.format("Defender downed: %s (revive in %.0fs)", tostring(bot.Id), delay))
+
+	task.delay(delay, function()
+		local active = (not WaveService) or (not WaveService.IsBattleActive) or WaveService.IsBattleActive()
+		if bot.Downed and active then
+			BotService.ReviveBot(bot, revivePercent)
+		end
+	end)
+
+	if WaveService and WaveService.OnDefenderDied then
+		WaveService.OnDefenderDied(bot)
+	end
+	return true
+end
+
+function BotService.ReviveBot(bot, hpPercent: number?)
+	if not bot or not bot.Downed then
+		return false
+	end
+	bot.Downed = false
+	bot.DownedAt = nil
+	bot.LockedTarget = nil
+	bot.LastFire = 0
+	local percent = math.clamp(hpPercent or 0.35, 0.05, 1)
+	local maxHP = math.max(1, bot.MaxHP or 100)
+	bot.CurrentHP = math.max(1, math.floor(maxHP * percent))
+
+	if bot.Model and bot.Model.Parent then
+		local humanoid = bot.Model:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.MaxHealth = maxHP
+			humanoid.Health = bot.CurrentHP
+		end
+		CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, maxHP)
+		pcall(function()
+			local pos = bot.DefensePosition or bot.Model:GetPivot().Position
+			if CharacterRigBuilder.ClearDownedPose then
+				CharacterRigBuilder.ClearDownedPose(bot.Model, BotService.GetDefenseCFrame(pos))
+			else
+				CharacterRigBuilder.LockStanding(bot.Model, BotService.GetDefenseCFrame(pos))
+			end
+		end)
+	end
+	debugCombat(string.format("BOT_REVIVED id=%s hp=%.0f", tostring(bot.Id), bot.CurrentHP))
+	return true
+end
+
 function BotService.HealAllBots()
 	local bots = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
+	local downedCfg = (GameConfig.Battle and GameConfig.Battle.Downed) or {}
+	local revivePercent = if downedCfg.ReviveOnWaveStart == false then 0.35 else 1
 	for _, bot in ipairs(bots) do
-		if bot.Alive and bot.Model and bot.Model.Parent then
+		if not bot.Alive then
+			continue
+		end
+		if bot.Downed then
+			-- Передышка между волнами: все раненые встают
+			BotService.ReviveBot(bot, revivePercent)
+		end
+		if bot.Model and bot.Model.Parent then
 			bot.CurrentHP = bot.MaxHP or bot.CurrentHP
 			CharacterRigBuilder.UpdateHealthBar(bot.Model, bot.CurrentHP, bot.MaxHP)
 			local hum = bot.Model:FindFirstChildOfClass("Humanoid")
@@ -225,6 +354,8 @@ function BotService.HealAllBots()
 				hum.MaxHealth = bot.MaxHP
 				hum.Health = bot.MaxHP
 			end
+		else
+			bot.CurrentHP = bot.MaxHP or bot.CurrentHP
 		end
 	end
 end
@@ -267,13 +398,19 @@ function BotService.DamageBot(bot, amount: number)
 	))
 
 	if bot.CurrentHP <= 0 then
-		bot.Alive = false
-		Log.Write("Wave", "Defender died: " .. tostring(bot.Id))
-		if bot.Model then
-			bot.Model:Destroy()
-		end
-		if WaveService and WaveService.OnDefenderDied then
-			WaveService.OnDefenderDied(bot)
+		local downedCfg = (GameConfig.Battle and GameConfig.Battle.Downed) or {}
+		if downedCfg.Enabled == false then
+			bot.Alive = false
+			Log.Write("Wave", "Defender died: " .. tostring(bot.Id))
+			if bot.Model then
+				bot.Model:Destroy()
+			end
+			if WaveService and WaveService.OnDefenderDied then
+				WaveService.OnDefenderDied(bot)
+			end
+		else
+			-- Раненый вместо мёртвого: модель остаётся в бою до подъёма
+			BotService.DownBot(bot)
 		end
 	end
 

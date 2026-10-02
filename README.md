@@ -97,6 +97,46 @@ M = 1.1 + 0.1 × (друзья в пати)  — макс. 1.4 при 3 друз
 
 **Боты:** `BotsInheritHostUpgrades = true` в GameConfig — наследуют прокачку хоста.
 
+## Проверка баланса боя (dev-инструменты)
+
+Единая точка настройки точности — `GameConfig.Battle.HitChance` (модель `AccuracyHelper`):
+шанс попадания падает с дистанцией, профиль ботов выше профиля врагов (1.0 против 0.8).
+
+```powershell
+# симулятор волн 1-5: попадания, выстрелы на убийство, таблицы клира
+python tools/first_waves_combat.py                # отчёт
+python tools/first_waves_combat.py --check        # выход 1 при провале жёсткой проверки
+python tools/first_waves_combat.py --log logs/game.log   # реальная телеметрия из лога
+python tools/first_waves_combat.py --weapon-tier 3 --bot-hp 175   # отряд с прокачкой
+python tools/first_waves_combat.py --lint         # + проверка синтаксиса src/ через lune
+
+# синтаксис всего кода без Roblox Studio (нужен lune из install-tools.ps1)
+lune run tools/lint_luau.luau src
+```
+
+Телеметрия включается флагом `GameConfig.Battle.DebugCombatDamage = true` — в
+`logs/game.log` появляются строки `BOT_HIT_ROLL` / `ENEMY_HIT_ROLL` (дистанция, шанс,
+бросок, LOS, попадание), их и разбирает `--log`.
+
+### Линия огня (LOS) и «невидимые» препятствия
+
+Боты и враги не стреляют, если трасса упирается в стену. На заказной карте в боевом
+коридоре стоят две почти невидимые детали: панель `0.1x28x101` (`Transparency = 0.8`)
+у самой линии обороны и стена `0.3x70x252` (`Transparency = 1`) поперёк моста. Первая
+ловила пули в 1-4 студах от ствола, вторая не пускала врагов к обороне. Ручки в
+`GameConfig.Battle`:
+
+- `LosGhostTransparency = 0.7` — части с `Transparency >= порога` не считаются
+  укрытием в `CombatVFX.HasClearLos`;
+- `CorridorClear` (`Enabled`, `Transparency`, `AlongPad`, `LateralPad`, `Below`,
+  `Above`) — `MapBind` на старте ищет такие детали (`CanCollide = true` и
+  `Transparency >= Transparency`) внутри боевого коридора и гасит им коллизию;
+  в лог пишется `battle corridor: cleared N invisible obstruction(s)`.
+
+Проверить LOS на новых картах без Studio: `lune run tools/check-los2.luau`
+(ожидается `FINAL(0.7)=20/20`); путь к `.rbxl` задаётся переменной окружения
+`CHECK_PLACE`.
+
 ## Точки карты
 
 Все механики привязаны к `Workspace.MapPoints`:

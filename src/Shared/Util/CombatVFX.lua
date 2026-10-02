@@ -6,6 +6,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
+
 local CombatVFX = {}
 
 local function ensureFolder(): Folder
@@ -28,6 +30,99 @@ end
 
 function CombatVFX.ShowDebugText(): boolean
 	return workspace:GetAttribute("BD_DebugCombatText") == true
+end
+
+--[[
+	Союзник не должен становиться «приёмником» выстрела: ни блокировать LOS,
+	ни быть концом трассера. Собираем модели своих юнитов, чтобы отдать их
+	в ignore-лист рейкаста — тогда выстрел считается только по карте.
+
+	units — список записей юнитов ({ Model = <Model> }) или сами модели.
+	skipModel — стрелок (он и так исключён вызывающим кодом).
+]]
+function CombatVFX.CollectModels(units: { any }?, skipModel: Model?): { Instance }
+	local out = {}
+	if type(units) ~= "table" then
+		return out
+	end
+	for _, unit in ipairs(units) do
+		local model = if type(unit) == "table" then unit.Model else unit
+		if
+			model ~= skipModel
+			and typeof(model) == "Instance"
+			and model:IsA("Model")
+			and model.Parent
+		then
+			table.insert(out, model)
+		end
+	end
+	return out
+end
+
+--[[
+	Тела бойцов — не укрытие. На мосту отряд и волна врагов идут плотной толпой,
+	поэтому любой выстрел упирался в ЧУЖОЕ тело (не в цель): los=false → chance=0
+	→ огонь не работал ни у ботов, ни у врагов, а трассер «прилетал» в союзника.
+
+	Собираем всех бойцов (workspace.Squad + workspace.Enemies), кроме стрелка и
+	цели: они уходят в ignore-лист рейкаста, и выстрел оценивается только по цели
+	и по карте (реальные укрытия).
+
+	units — необязательный явный список (иначе берём папки Squad/Enemies).
+]]
+function CombatVFX.CollectOtherCombatants(
+	shooterModel: Model?,
+	targetModel: Model?,
+	units: { any }?
+): { Instance }
+	local out = {}
+
+	local function add(model)
+		if
+			model ~= nil
+			and model ~= shooterModel
+			and model ~= targetModel
+			and typeof(model) == "Instance"
+			and model:IsA("Model")
+			and model.Parent
+		then
+			table.insert(out, model)
+		end
+	end
+
+	if type(units) == "table" and #units > 0 then
+		for _, unit in ipairs(units) do
+			add(if type(unit) == "table" then unit.Model else unit)
+		end
+		return out
+	end
+
+	for _, folderName in ipairs({ "Squad", "Enemies" }) do
+		local folder = workspace:FindFirstChild(folderName)
+		if folder then
+			for _, child in ipairs(folder:GetChildren()) do
+				add(child)
+			end
+		end
+	end
+	return out
+end
+
+-- Дополняет ignore-лист союзниками (сам список создаётся вызывающим кодом)
+local function mergeExtraIgnore(
+	ignore: { Instance },
+	extraIgnore: { Instance }?,
+	shooterModel: Model?
+): { Instance }
+	if type(extraIgnore) ~= "table" then
+		return ignore
+	end
+	for _, inst in ipairs(extraIgnore) do
+		if inst ~= shooterModel and typeof(inst) == "Instance" and inst.Parent then
+			table.insert(ignore, inst)
+		end
+	end
+	return ignore
 end
 
 function CombatVFX.GetMuzzleWorldPosition(model: Model?): Vector3?
@@ -85,14 +180,32 @@ function CombatVFX.GetShotEndpoint(
 	return pos, result ~= nil
 end
 
--- true = можно стрелять (воздух или попали в цель); false = стена/карта
+--[[
+	Порог «призрачности» (GameConfig.Battle.LosGhostTransparency, по умолчанию 0.7):
+	части с Transparency >= порога не считаются укрытием. У заказной карты у
+	самой линии обороны стоит почти невидимая панель (0.1x28x101,
+	Transparency = 0.8), а поперёк моста — невидимая стена (0.3x70x252,
+	Transparency = 1): обе «съедали» выстрелы у самого ствола.
+]]
+local GHOST_TRANSPARENCY = tonumber(GameConfig.Battle and GameConfig.Battle.LosGhostTransparency) or 0.7
+
+--[[
+	true = можно стрелять (воздух или попали в цель); false = укрытие/карта.
+	2-е значение — точка попадания, 3-е — блокирующая часть (для дебаг-логов).
+
+	Укрытием считается только стена/проп карты с коллизией и с крутым наклоном.
+	Тела бойцов (кроме цели), невидимые и несолидные части, а также «плоские»
+	поверхности (настил моста и свод арки) — пропускаются: иначе на этом мосту
+	los=false срабатывал на 100% выстрелов и огонь не работал вообще.
+]]
 function CombatVFX.HasClearLos(
 	origin: Vector3,
 	aim: Vector3,
 	maxRange: number?,
 	shooterModel: Model?,
-	targetModel: Model?
-): (boolean, Vector3)
+	targetModel: Model?,
+	extraIgnore: { Instance }?
+): (boolean, Vector3, BasePart?)
 	local range = math.max(1, tonumber(maxRange) or 180)
 	local direction = aim - origin
 	if direction.Magnitude < 0.05 then
@@ -108,10 +221,15 @@ function CombatVFX.HasClearLos(
 	if vfxFolder then
 		table.insert(ignore, vfxFolder)
 	end
+	-- Союзники не препятствие: свой не должен блокировать ствол и ловить трассер
+	mergeExtraIgnore(ignore, extraIgnore, shooterModel)
+	-- Толпа не препятствие: отряд и враги стоят/идут вплотную друг к другу,
+	-- иначе выстрел всегда упирается в чужое тело и огонь не работает
+	mergeExtraIgnore(ignore, CombatVFX.CollectOtherCombatants(shooterModel, targetModel), shooterModel)
 
 	local from = origin
 	local remaining = range
-	-- Несколько шагов: пропускаем пол/рампы (Normal.Y высокий), не считая их стеной
+	-- Несколько шагов: пропускаем непрозрачные для пули поверхности, не считая их стеной
 	for _ = 1, 6 do
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
@@ -120,29 +238,33 @@ function CombatVFX.HasClearLos(
 
 		local result = workspace:Raycast(from, unit * remaining, params)
 		if not result then
-			return true, origin + unit * range
+			return true, origin + unit * range, nil
 		end
 
 		if targetModel and result.Instance:IsDescendantOf(targetModel) then
-			return true, result.Position
+			return true, result.Position, nil
 		end
 
-		-- Пол / настил моста — не блок LOS
-		if result.Normal.Y > 0.55 then
-			table.insert(ignore, result.Instance)
+		local part = result.Instance
+		-- Пол / настил моста и свод арки — не укрытие (стрельба идёт вдоль моста)
+		local flatSurface = math.abs(result.Normal.Y) > 0.55
+		-- Невидимый или без коллизии декор тоже не укрытие
+		local ghostPart = (not part.CanCollide) or part.Transparency >= GHOST_TRANSPARENCY
+		if flatSurface or ghostPart then
+			table.insert(ignore, part)
 			local traveled = (result.Position - from).Magnitude
 			from = result.Position + unit * 0.15
 			remaining = math.max(0, remaining - traveled - 0.15)
 			if remaining < 0.5 then
-				return true, result.Position
+				return true, result.Position, nil
 			end
 			continue
 		end
 
-		return false, result.Position
+		return false, result.Position, part
 	end
 
-	return true, origin + unit * range
+	return true, origin + unit * range, nil
 end
 
 function CombatVFX.NotifyShot(opts: {
@@ -207,13 +329,18 @@ function CombatVFX.PlayMiss(
 	aim: Vector3,
 	botModel: Model?,
 	weaponType: string?,
-	maxRange: number?
+	maxRange: number?,
+	extraIgnore: { Instance }?
 )
 	local ignore = if botModel then { botModel } else {}
 	local vfxFolder = workspace:FindFirstChild("CombatVFX")
 	if vfxFolder then
 		table.insert(ignore, vfxFolder)
 	end
+	-- Промах не должен визуально «упираться» в союзника — считаем только карту
+	mergeExtraIgnore(ignore, extraIgnore, botModel)
+	-- ...и в тело любого другого бойца (иначе трассер «стреляет по своим»)
+	mergeExtraIgnore(ignore, CombatVFX.CollectOtherCombatants(botModel), botModel)
 	local missPoint = CombatVFX.GetShotEndpoint(origin, aim, maxRange or (aim - origin).Magnitude, ignore)
 
 	if botModel then

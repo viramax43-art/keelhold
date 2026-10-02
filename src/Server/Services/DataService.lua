@@ -200,7 +200,27 @@ local function migrateInventory(profile, raw)
 	end
 end
 
-local function materializeProfile(dataTable, rawSource)
+local function materializeProfile(dataTable, rawSource, userId: number?)
+	if type(dataTable) == "table" then
+		for _, key in ipairs({
+			"Upgrades",
+			"OwnedWeapons",
+			"WeaponCopies",
+			"SquadLoadout",
+			"SquadArmor",
+			"HighestWave",
+			"LastCheckpoint",
+		}) do
+			if dataTable[key] == nil then
+				Log.Write(
+					"Data",
+					"PROFILE_MISSING_FIELD userId=" .. tostring(userId or "?") .. " field=" .. key,
+					"WARN"
+				)
+			end
+		end
+	end
+	-- Reconcile только дополняет отсутствующие поля шаблоном, не затирает существующие
 	local profile = Util.ReconcileProfile(dataTable, ProfileTemplate)
 	Util.NormalizeProfileMaps(profile)
 	profile.Level = Util.LevelFromTotalXP(profile.TotalXP or 0, GameConfig.XPPerLevel, GameConfig.XPPerLevelGrowth)
@@ -324,15 +344,36 @@ local function studioHttpLoad(userId: number)
 	return nil
 end
 
+local function profileSummary(profile): string
+	if type(profile) ~= "table" then
+		return "nil"
+	end
+	return string.format(
+		"Gold=%s XP=%s TotalXP=%s Upgrades=%s WeaponCopies=%s OwnedWeapons=%s SquadLoadout=%s SquadArmor=%s LastCheckpoint=%s HighestWave=%s",
+		tostring(profile.Gold),
+		tostring(profile.XP),
+		tostring(profile.TotalXP),
+		tostring(next(profile.Upgrades or {}) ~= nil),
+		tostring(next(profile.WeaponCopies or {}) ~= nil),
+		tostring(next(profile.OwnedWeapons or {}) ~= nil),
+		tostring(next(profile.SquadLoadout or {}) ~= nil),
+		tostring(next(profile.SquadArmor or {}) ~= nil),
+		tostring(profile.LastCheckpoint),
+		tostring(profile.HighestWave)
+	)
+end
+
 local function studioHttpSave(userId: number, profile, force: boolean?): (boolean, string?)
 	local payload = Util.PrepareProfileForStorage(profile)
+	Log.Write("Data", "PROFILE_SAVE_FIELDS userId=" .. tostring(userId) .. " " .. profileSummary(payload))
 	local okEnc, jsonOrErr = pcall(function()
 		return HttpService:JSONEncode(payload)
 	end)
 	if not okEnc then
 		return false, "JSONEncode failed: " .. tostring(jsonOrErr)
 	end
-	local suffix = if force then "?force=1" else ""
+	-- В Studio-local всегда force: полный snapshot через один coordinator
+	local suffix = if force == false then "" else "?force=1"
 	local lastErr = "LogServer unreachable"
 	for _, base in ipairs(STUDIO_PROFILE_URLS) do
 		local ok, res = pcall(function()
@@ -343,12 +384,22 @@ local function studioHttpSave(userId: number, profile, force: boolean?): (boolea
 				Body = jsonOrErr,
 			})
 		end)
-		if ok and type(res) == "table" and res.Success and (res.StatusCode or 0) >= 200 and (res.StatusCode or 0) < 300 then
-			return true, nil
+		if ok and type(res) == "table" then
+			local code = tonumber(res.StatusCode) or 0
+			local body = string.lower((tostring(res.Body or "")):gsub("%s+", ""))
+			if code == 409 or body == "skipped-stale" then
+				return false, "Studio profile save skipped as stale"
+			end
+			if res.Success and code >= 200 and code < 300 then
+				if body == "saved" or body == "ok" or body == "" or body == "savedok" then
+					return true, nil
+				end
+				return false, "Unexpected Studio profile response: " .. tostring(res.Body)
+			end
+			lastErr = string.format("HTTP %s %s", tostring(res.StatusCode), tostring(res.Body))
+		else
+			lastErr = tostring(res)
 		end
-		lastErr = if ok and type(res) == "table"
-			then string.format("HTTP %s %s", tostring(res.StatusCode), tostring(res.Body))
-			else tostring(res)
 	end
 	return false, lastErr
 end
@@ -519,7 +570,8 @@ local function saveProfileInternal(player: Player, reason: string?, releaseSessi
 	)
 
 	if studioLocalMode then
-		local ok, err = studioHttpSave(userId, snapshot, shouldRelease)
+		-- Всегда полный snapshot (?force=1); skipped-stale = ошибка
+		local ok, err = studioHttpSave(userId, snapshot, true)
 		if not ok then
 			Log.Write("Data", string.format("PROFILE_SAVE_FAILED userId=%d err=%s", userId, tostring(err)), "ERROR")
 			return false, err
@@ -1001,7 +1053,7 @@ function DataService.ReacquireProfile(player: Player): (boolean, string?)
 	if studioLocalMode or (RunService:IsStudio() and not probeDataStoreAvailable()) then
 		enableStudioLocalMode("reacquire")
 		local raw = studioHttpLoad(userId) or loadFromStudioModule(userId)
-		local profile = materializeProfile(raw, raw)
+		local profile = materializeProfile(raw, raw, userId)
 		profiles[userId] = profile
 		saveStates[userId] = newSaveState(1)
 		loadDone[userId] = true
@@ -1029,13 +1081,14 @@ function DataService.ReacquireProfile(player: Player): (boolean, string?)
 		return false, err or "Reacquire failed"
 	end
 
-	local profile = materializeProfile(envelope.Data, envelope.Data)
+	local profile = materializeProfile(envelope.Data, envelope.Data, userId)
 	local metaRev = tonumber(envelope.Meta and envelope.Meta.Revision) or 0
 	profiles[userId] = profile
 	saveStates[userId] = newSaveState(metaRev)
 	loadDone[userId] = true
 	syncPlayerAttrs(player, profile, true)
 	Log.Write("Data", string.format("PROFILE_LOCK_ACQUIRED userId=%d (reacquire)", userId))
+	Log.Write("Data", "PROFILE_LOAD_FIELDS userId=" .. tostring(userId) .. " " .. profileSummary(profile))
 	DataService.NotifyProfile(player)
 	return true, nil
 end
@@ -1118,28 +1171,34 @@ local function loadProfile(player: Player): boolean
 	local function loadStudioLocal(): boolean
 		enableStudioLocalMode("load fallback")
 		local raw = studioHttpLoad(userId) or loadFromStudioModule(userId)
-		local profile = materializeProfile(raw, raw)
+		local profile = materializeProfile(raw, raw, userId)
 		profiles[userId] = profile
 		saveStates[userId] = newSaveState(1)
 		if raw == nil then
+			-- Новый игрок: создаём через coordinator, не async fire-and-forget
 			saveStates[userId].Dirty = true
+			saveStates[userId].Revision = 1
 		end
 		loadDone[userId] = true
 		syncPlayerAttrs(player, profile, true)
 		Log.Write(
 			"Data",
 			string.format(
-				"PROFILE_LOAD_SUCCESS (studioLocal) userId=%d Gold=%s TotalXP=%s source=%s",
+				"PROFILE_LOAD_SUCCESS (studioLocal) userId=%d source=%s %s",
 				userId,
-				tostring(profile.Gold),
-				tostring(profile.TotalXP),
-				if raw then "local" else "template"
+				if raw then "local" else "template",
+				profileSummary(profile)
 			)
 		)
-		-- Сразу пробуем записать в LogServer, чтобы следующий Play видел профиль
-		task.spawn(function()
-			studioHttpSave(userId, profile, true)
-		end)
+		Log.Write("Data", "PROFILE_LOAD_FIELDS userId=" .. tostring(userId) .. " " .. profileSummary(profile))
+		-- Не вызываем studioHttpSave при загрузке — только memory + dirty для нового профиля
+		if raw == nil and player.Parent then
+			task.defer(function()
+				if profiles[userId] and saveStates[userId] and saveStates[userId].Dirty then
+					DataService.FlushProfile(player, "StudioNewProfile", false)
+				end
+			end)
+		end
 		return true
 	end
 
@@ -1203,7 +1262,7 @@ local function loadProfile(player: Player): boolean
 		string.format("PROFILE_LOCK_ACQUIRED userId=%d rev=%s", userId, tostring(envelope.Meta and envelope.Meta.Revision))
 	)
 
-	local profile = materializeProfile(envelope.Data, envelope.Data)
+	local profile = materializeProfile(envelope.Data, envelope.Data, userId)
 	local metaRev = tonumber(envelope.Meta and envelope.Meta.Revision) or 0
 	profiles[userId] = profile
 	saveStates[userId] = newSaveState(metaRev)
@@ -1220,6 +1279,7 @@ local function loadProfile(player: Player): boolean
 			tostring(profile.HighestWave)
 		)
 	)
+	Log.Write("Data", "PROFILE_LOAD_FIELDS userId=" .. tostring(userId) .. " " .. profileSummary(profile))
 	return true
 end
 

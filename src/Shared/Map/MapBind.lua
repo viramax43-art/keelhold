@@ -583,6 +583,88 @@ local function computeBridgeDeck(bridge: Instance)
 	}
 end
 
+--[[
+	Невидимые части с коллизией внутри боевого коридора ломают бой на заказной
+	карте: у линии обороны стоит панель 0.1x28x101 (Transparency = 0.8) — она
+	съедала выстрелы ботов в 1-4 студах от ствола, а поперёк моста стоит стена
+	0.3x70x252 (Transparency = 1) — в неё упирались враги и никогда не доходили
+	до обороны. Такие детали не должны ни держать NPC, ни ловить пули: выключаем
+	им коллизию, после чего их игнорирует и CombatVFX.HasClearLos (CanCollide = false).
+]]
+-- Значения — GameConfig.Battle.CorridorClear (в скобках дефолты)
+local CORRIDOR_CFG = (GameConfig.Battle and GameConfig.Battle.CorridorClear) or {}
+local OBSTRUCTION_CLEAR_ENABLED = CORRIDOR_CFG.Enabled ~= false
+local OBSTRUCTION_TRANSPARENCY = tonumber(CORRIDOR_CFG.Transparency) or 0.7
+local OBSTRUCTION_ALONG_PAD = tonumber(CORRIDOR_CFG.AlongPad) or 12
+local OBSTRUCTION_LATERAL_PAD = tonumber(CORRIDOR_CFG.LateralPad) or 2
+local OBSTRUCTION_BELOW = tonumber(CORRIDOR_CFG.Below) or 3
+local OBSTRUCTION_ABOVE = tonumber(CORRIDOR_CFG.Above) or 9
+
+local function clearInvisibleObstructions(
+	samples: { Vector3 },
+	deck,
+	width: number,
+	exclude: { Instance }
+): (number, { string })
+	if not OBSTRUCTION_CLEAR_ENABLED then
+		return 0, {}
+	end
+	local minX, maxX = math.huge, -math.huge
+	local minZ, maxZ = math.huge, -math.huge
+	for _, sample in ipairs(samples) do
+		minX, maxX = math.min(minX, sample.X), math.max(maxX, sample.X)
+		minZ, maxZ = math.min(minZ, sample.Z), math.max(maxZ, sample.Z)
+	end
+	if minX > maxX then
+		return 0, {}
+	end
+
+	-- Коридор: вдоль моста + запас, поперёк — ширина настила + запас, по высоте — грудь бойца
+	local lateralPad = math.max(2, width * 0.5 + OBSTRUCTION_LATERAL_PAD)
+	if deck.UseX then
+		minX, maxX = minX - OBSTRUCTION_ALONG_PAD, maxX + OBSTRUCTION_ALONG_PAD
+		minZ, maxZ = minZ - lateralPad, maxZ + lateralPad
+	else
+		minX, maxX = minX - lateralPad, maxX + lateralPad
+		minZ, maxZ = minZ - OBSTRUCTION_ALONG_PAD, maxZ + OBSTRUCTION_ALONG_PAD
+	end
+	local minY = deck.DeckY - OBSTRUCTION_BELOW
+	local maxY = deck.DeckY + OBSTRUCTION_ABOVE
+
+	local center = Vector3.new((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5)
+	local size = Vector3.new(maxX - minX, maxY - minY, maxZ - minZ)
+
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = exclude
+	params.MaxParts = 1000
+
+	local ok, hits = pcall(function()
+		return workspace:GetPartBoundsInBox(CFrame.new(center), size, params)
+	end)
+	if not ok then
+		Log.Write("Map", "GetPartBoundsInBox failed: " .. tostring(hits), "WARN")
+		return 0, {}
+	end
+
+	local cleared, names = 0, {}
+	for _, part in ipairs(hits) do
+		-- Центр детали должен быть внутри коридора: части, которые лишь краем
+		-- повёрнутого AABB задевают коробку, не трогаем (за линией обороны их много).
+		local position = part.Position
+		local inside = position.X >= minX
+			and position.X <= maxX
+			and position.Z >= minZ
+			and position.Z <= maxZ
+		if inside and part:IsA("BasePart") and part.CanCollide and part.Transparency >= OBSTRUCTION_TRANSPARENCY then
+			part.CanCollide = false
+			cleared += 1
+			table.insert(names, part:GetFullName())
+		end
+	end
+	return cleared, names
+end
+
 function MapBind.GetDefenseCFrame(position: Vector3): CFrame
 	local look = defenseLook
 	if look.Magnitude < 0.1 then
@@ -754,6 +836,25 @@ function MapBind.BindBattlePoints(): boolean
 		setInvisiblePoint(folder, wpName, along(t, 0))
 	end
 	setInvisiblePoint(folder, names.BridgePath, along(pathEndT, 0))
+
+	-- Невидимые стены/панели в зоне боя: у линии обороны — почти невидимая панель
+	-- (Transparency = 0.8), поперёк моста — невидимая стена (Transparency = 1).
+	-- Первая «съедала» выстрелы ботов, вторая держала врагов, не пуская их к обороне.
+	local corridor = { along(enemyT, 0) }
+	for i = 1, 16 do
+		local t = enemyT * (1 - i / 16) + pathEndT * (i / 16)
+		table.insert(corridor, along(t, 0))
+	end
+	for _, lateral in ipairs(laterals) do
+		table.insert(corridor, along(defenseT, lateral))
+	end
+	local cleared, clearedNames = clearInvisibleObstructions(corridor, deck, width, rayParams.FilterDescendantsInstances)
+	if cleared > 0 then
+		Log.Write("Map", string.format("battle corridor: cleared %d invisible obstruction(s)", cleared))
+		for _, fullName in ipairs(clearedNames) do
+			Log.Write("Map", "  cleared obstruction: " .. fullName)
+		end
+	end
 
 	local spawn = workspace:FindFirstChildWhichIsA("SpawnLocation", true)
 	if spawn then

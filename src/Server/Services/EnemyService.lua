@@ -1,7 +1,9 @@
 --[[
 	EnemyService — спавн и AI врагов.
 	Движение: один общий Heartbeat (без per-enemy task.wait).
-	Оружие: индивидуальные Range/Accuracy/Spread из WeaponsConfig.
+	Оружие: собственные статы врагов из EnemiesConfig.EnemyWeapons
+	(Range/Accuracy/Spread/DamageMult) — НЕ статы игрока из WeaponsConfig.
+	Точность: AccuracyHelper + GameConfig.Battle.HitChance (профиль "enemy").
 	Очередь: attack slots + queue slots по полосам.
 ]]
 
@@ -9,7 +11,6 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local GameConfig = require(ReplicatedStorage.Shared.Config.GameConfig)
 local EnemiesConfig = require(ReplicatedStorage.Shared.Config.EnemiesConfig)
-local WeaponsConfig = require(ReplicatedStorage.Shared.Config.WeaponsConfig)
 local CharacterRigBuilder = require(ReplicatedStorage.Shared.Builders.CharacterRigBuilder)
 local WaveScaling = require(ReplicatedStorage.Shared.Util.WaveScaling)
 local AccuracyHelper = require(ReplicatedStorage.Shared.Util.AccuracyHelper)
@@ -38,27 +39,23 @@ local function debugCombat(message: string)
 	end
 end
 
+--[[
+	Статы оружия врага: свои значения из EnemiesConfig.EnemyWeapons, а не
+	статы игрока. Дальность медленно растёт по волнам (RangeGrowthPerWave).
+]]
 local function getWeaponStats(weaponType: string, wave: number)
-	local maxTier = WeaponsConfig.MaxTier or 5
-	local tier = math.clamp(1 + math.floor(math.max(0, wave - 1) / 4), 1, maxTier)
-	local byType = WeaponsConfig.Weapons and WeaponsConfig.Weapons[weaponType]
-	local cfg = byType and (byType[tier] or byType[1])
-	if type(cfg) ~= "table" then
-		return {
-			Damage = EnemiesConfig.BaseStats.Damage,
-			FireRate = EnemiesConfig.BaseStats.FireRate,
-			Range = EnemiesConfig.AttackRange or 180,
-			Accuracy = EnemiesConfig.BaseStats.Accuracy,
-			Spread = 0.28,
-			Tier = tier,
-		}
-	end
+	local cfg = (EnemiesConfig.EnemyWeapons or {})[weaponType] or {}
+	local tier = math.clamp(1 + math.floor(math.max(0, wave - 1) / 4), 1, 10)
+	local rangeMult = math.min(
+		EnemiesConfig.RangeGrowthCap or 1.35,
+		1 + (EnemiesConfig.RangeGrowthPerWave or 0) * math.max(0, wave - 1)
+	)
 	return {
-		Damage = tonumber(cfg.Damage) or EnemiesConfig.BaseStats.Damage,
-		FireRate = tonumber(cfg.FireRate) or EnemiesConfig.BaseStats.FireRate,
-		Range = tonumber(cfg.Range) or (EnemiesConfig.AttackRange or 180),
+		DamageMult = tonumber(cfg.DamageMult) or 1,
 		Accuracy = tonumber(cfg.Accuracy) or EnemiesConfig.BaseStats.Accuracy,
-		Spread = tonumber(cfg.Spread) or 0.28,
+		Spread = tonumber(cfg.Spread) or 0.30,
+		Range = (tonumber(cfg.Range) or (EnemiesConfig.AttackRange or 160)) * rangeMult,
+		FireRateMult = tonumber(cfg.FireRateMult) or 1,
 		Tier = tier,
 	}
 end
@@ -421,7 +418,8 @@ function EnemyService.UpdateBotPositionCache()
 	cachedBotPositions = {}
 	local bots = WaveService and WaveService.GetBots and WaveService.GetBots() or {}
 	for _, b in ipairs(bots) do
-		if b.Alive and b.Root then
+		-- Раненые (Downed) лежат: враги их не добивают и не берут в цель
+		if b.Alive and not b.Downed and b.Root then
 			table.insert(cachedBotPositions, {
 				Position = b.Root.Position,
 				Record = b,
@@ -429,6 +427,24 @@ function EnemyService.UpdateBotPositionCache()
 		end
 	end
 	return cachedBotPositions
+end
+
+-- Модели своих (врагов) — чтобы промах не «упирался» в союзника.
+-- Кэш обновляется не чаще CACHE_INTERVAL, как и позиции ботов.
+local cachedEnemyModels = {}
+local lastEnemyModelCache = 0
+local function enemyModelsFor(): { Instance }
+	local now = os.clock()
+	if now - lastEnemyModelCache >= CACHE_INTERVAL then
+		lastEnemyModelCache = now
+		table.clear(cachedEnemyModels)
+		for _, e in ipairs(enemies) do
+			if e.Alive and e.Model and e.Model.Parent then
+				table.insert(cachedEnemyModels, e.Model)
+			end
+		end
+	end
+	return cachedEnemyModels
 end
 
 function EnemyService.DamageEnemy(enemy, amount: number, attacker: Player?)
@@ -530,8 +546,8 @@ local function tryFire(enemy, now: number, speedMult: number)
 	local fireCd = enemy.FireRate or 0.5
 	local dmg = enemy.Damage or 8
 	if useMelee then
-		fireCd = EnemiesConfig.MeleeFireRate or 0.45
-		dmg = dmg * (EnemiesConfig.MeleeDamageMult or 2.2)
+		fireCd = EnemiesConfig.MeleeFireRate or 0.9
+		dmg = dmg * (EnemiesConfig.MeleeDamageMult or 1.1)
 	end
 	fireCd = fireCd / math.max(1, speedMult)
 
@@ -571,12 +587,14 @@ local function tryFire(enemy, now: number, speedMult: number)
 		CharacterRigBuilder.PlayFireAnimation(enemy.Model, aim)
 	end)
 
-	local losClear, losPos = true, aim
-	local losOk, a, b = pcall(function()
+	local losClear, losPos, losBlock = true, aim, nil
+	local losOk, a, b, c = pcall(function()
+		-- Без extraIgnore: HasClearLos сам исключает тела бойцов (кроме цели),
+		-- иначе своя же волна впереди гасит выстрелы
 		return CombatVFX.HasClearLos(origin, aim, weaponRange, enemy.Model, best.Model)
 	end)
 	if losOk then
-		losClear, losPos = a, b
+		losClear, losPos, losBlock = a, b, c
 	end
 
 	local hit, chance, roll = false, 0, 1
@@ -585,7 +603,12 @@ local function tryFire(enemy, now: number, speedMult: number)
 	elseif not losClear then
 		hit = false
 		aim = losPos
-		debugCombat(string.format("ENEMY_OUT_OF_RANGE enemy=%s reason=los_blocked", tostring(enemy.Id)))
+		debugCombat(string.format(
+			"ENEMY_OUT_OF_RANGE enemy=%s reason=los_blocked part=%s dist=%.1f",
+			tostring(enemy.Id),
+			losBlock and losBlock:GetFullName() or "unknown",
+			losBlock and (losBlock.Position - origin).Magnitude or -1
+		))
 	else
 		local shotDistance = math.min(bestD, weaponRange)
 		hit, chance, roll = AccuracyHelper.RollShot({
@@ -596,6 +619,8 @@ local function tryFire(enemy, now: number, speedMult: number)
 			movingShooter = enemy.State == "Moving",
 			movingTarget = false,
 			entityMod = 0,
+			-- Враги — слабый профиль: мажут заметно чаще ботов
+			profileMult = AccuracyHelper.GetProfileMult("enemy"),
 		})
 	end
 
@@ -615,6 +640,17 @@ local function tryFire(enemy, now: number, speedMult: number)
 	if GameConfig.Battle and GameConfig.Battle.ForceEnemyHitsForTest then
 		hit = true
 	end
+
+	-- Визуальный разброс трассеров: только по горизонтали (вертикали нет).
+	local visualAim = aim
+	pcall(function()
+		visualAim = AccuracyHelper.SpreadAim(origin, aim, {
+			accuracy = enemy.Accuracy,
+			spread = enemy.Spread or 0.28,
+			distance = math.min(bestD, weaponRange),
+			maxRange = weaponRange,
+		})
+	end)
 
 	if hit then
 		local targetId = best.Id or "unknown"
@@ -644,11 +680,18 @@ local function tryFire(enemy, now: number, speedMult: number)
 			))
 		end
 		pcall(function()
-			CombatVFX.PlayMuzzle(origin, aim, enemy.Model, enemy.WeaponType)
+			CombatVFX.PlayMuzzle(origin, visualAim, enemy.Model, enemy.WeaponType)
 		end)
 	else
 		pcall(function()
-			CombatVFX.PlayMiss(origin, aim, enemy.Model, enemy.WeaponType, weaponRange)
+			CombatVFX.PlayMiss(
+				origin,
+				visualAim,
+				enemy.Model,
+				enemy.WeaponType,
+				weaponRange,
+				enemyModelsFor()
+			)
 		end)
 	end
 end
@@ -783,8 +826,9 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 	local baseDmg = EnemiesConfig.BaseStats.Damage or 8
 	local baseFire = EnemiesConfig.BaseStats.FireRate or 0.6
 	local baseAcc = EnemiesConfig.BaseStats.Accuracy or 0.55
+	-- Рост урона/точности по волнам берём из WaveScaling как отношение к базе.
+	-- Темп стрельбы считается напрямую: stats.FireRate * оружие.FireRateMult.
 	local waveDmgMult = (stats.Damage or baseDmg) / baseDmg
-	local waveFireMult = baseFire / math.max(0.05, stats.FireRate or baseFire)
 	local waveAccBonus = (stats.Accuracy or baseAcc) - baseAcc
 
 	local function laneLateral(laneIndex: number): number
@@ -817,7 +861,8 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 			local typeMod = types[weaponType] or {}
 			local weaponCfg = getWeaponStats(weaponType, wave)
 			local finalHP = stats.HP * (typeMod.HPMult or 1)
-			local finalDMG = weaponCfg.Damage * (typeMod.DamageMult or 1) * waveDmgMult
+			-- Урон врага: база * множитель оружия врага * рост по волнам
+			local finalDMG = baseDmg * weaponCfg.DamageMult * waveDmgMult
 			local speedJitter = 0.85 + math.random() * 0.3
 			local finalSpeed = stats.WalkSpeed * (typeMod.SpeedMult or 1) * speedJitter
 			local finalAcc = math.clamp(
@@ -825,9 +870,10 @@ function EnemyService.SpawnWave(wave: number, difficultyMult: number)
 				0.2,
 				0.95
 			)
+			-- Интервал между выстрелами: темп базы (растёт по волнам) * темп оружия
 			local finalFire = math.max(
 				EnemiesConfig.MinFireRate or 0.15,
-				weaponCfg.FireRate / math.max(0.5, waveFireMult)
+				(stats.FireRate or baseFire) * (weaponCfg.FireRateMult or 1)
 			)
 			local finalSpread = weaponCfg.Spread
 			local finalRange = weaponCfg.Range

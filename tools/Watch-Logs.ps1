@@ -9,6 +9,35 @@ $Filter = "BridgeDefense"
 $SaveMarker = "__BD_PROFILE_SAVE__"
 $MetaMarker = "__BD_PROFILE_META__"
 
+# Тот же файл, что у LogServer: Add-Content конфликтует — shared append
+$script:LogFileLock = New-Object System.Object
+function Append-SharedLog {
+    param([string]$Path, [string]$Text)
+    if (-not $Text) { return }
+    $line = if ($Text.EndsWith("`n")) { $Text } else { $Text + "`r`n" }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
+    [System.Threading.Monitor]::Enter($script:LogFileLock)
+    try {
+        $fs = $null
+        try {
+            $fs = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Append,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::ReadWrite
+            )
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+        } finally {
+            if ($fs) { $fs.Dispose() }
+        }
+    } catch {
+        # ignore lock races with LogServer
+    } finally {
+        [System.Threading.Monitor]::Exit($script:LogFileLock)
+    }
+}
+
 $logDirs = @(
     "$env:LOCALAPPDATA\Roblox\logs",
     "$env:LOCALAPPDATA\Roblox\Logs"
@@ -141,9 +170,13 @@ New-Item -ItemType Directory -Force -Path (Split-Path $OutFile) | Out-Null
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
 
 if (-not (Test-Path $OutFile)) {
-    Set-Content -Path $OutFile -Value "=== Studio watch -> game.log started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -Encoding UTF8
+    [System.IO.File]::WriteAllText(
+        $OutFile,
+        "=== Studio watch -> game.log started $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===`r`n",
+        [System.Text.UTF8Encoding]::new($false)
+    )
 } else {
-    Add-Content -Path $OutFile -Value "`n--- Studio watch restarted $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ---" -Encoding UTF8
+    Append-SharedLog -Path $OutFile -Text "`r`n--- Studio watch restarted $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ---"
 }
 
 # Seed module from existing json files
@@ -161,7 +194,7 @@ while ($true) {
         if (-not $currentFile -or $currentFile.FullName -ne $latest.FullName) {
             $currentFile = $latest
             $lastSize = [Math]::Max(0, $latest.Length - 256kb)
-            Add-Content -Path $OutFile -Value "--- Source: $($latest.FullName) ---" -Encoding UTF8
+            Append-SharedLog -Path $OutFile -Text "--- Source: $($latest.FullName) ---"
         }
 
         if ($latest.Length -gt $lastSize) {
@@ -173,12 +206,12 @@ while ($true) {
                 if (-not $line) { continue }
                 if ($line.Contains($SaveMarker)) {
                     Handle-ProfileSaveLine -Line $line
-                    Add-Content -Path $OutFile -Value $line -Encoding UTF8
+                    Append-SharedLog -Path $OutFile -Text $line
                 } elseif ($line.Contains($MetaMarker)) {
                     Handle-ProfileMetaLine -Line $line
-                    Add-Content -Path $OutFile -Value $line -Encoding UTF8
+                    Append-SharedLog -Path $OutFile -Text $line
                 } elseif ($line.Contains($Filter)) {
-                    Add-Content -Path $OutFile -Value $line -Encoding UTF8
+                    Append-SharedLog -Path $OutFile -Text $line
                 }
             }
             $lastSize = $stream.Position

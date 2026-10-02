@@ -16,11 +16,40 @@ $MetaMarker = "__BD_PROFILE_META__"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
 
+# Add-Content ломается, когда Watch-Logs держит тот же game.log — пишем через shared FileStream
+$script:LogFileLock = New-Object System.Object
+function Append-SharedLog {
+    param([string]$Path, [string]$Text)
+    if (-not $Text) { return }
+    $line = if ($Text.EndsWith("`n")) { $Text } else { $Text + "`r`n" }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line)
+    [System.Threading.Monitor]::Enter($script:LogFileLock)
+    try {
+        $fs = $null
+        try {
+            $fs = [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::Append,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::ReadWrite
+            )
+            $fs.Write($bytes, 0, $bytes.Length)
+            $fs.Flush()
+        } finally {
+            if ($fs) { $fs.Dispose() }
+        }
+    } catch {
+        # не роняем HTTP-сервер из-за лога
+    } finally {
+        [System.Threading.Monitor]::Exit($script:LogFileLock)
+    }
+}
+
 if (-not (Test-Path $LogFile)) {
-    $header = "=== Bridge Defense game.log ===`nStarted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`nPort: $Port`n"
-    Set-Content -Path $LogFile -Value $header -Encoding UTF8
+    $header = "=== Bridge Defense game.log ===`r`nStarted: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`nPort: $Port`r`n"
+    [System.IO.File]::WriteAllText($LogFile, $header, [System.Text.UTF8Encoding]::new($false))
 } else {
-    Add-Content -Path $LogFile -Value "`n--- LogServer restarted $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ---" -Encoding UTF8
+    Append-SharedLog -Path $LogFile -Text "`r`n--- LogServer restarted $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ---"
 }
 
 $script:ProfileLock = New-Object System.Object
@@ -90,7 +119,7 @@ function Save-ProfileJson {
         [System.IO.File]::WriteAllText($file, $Json, [System.Text.UTF8Encoding]::new($false))
         $script:ModuleDirty = $true
         $saved = $true
-        Write-Host ("Saved profile {0} Gold={1} TotalXP={2}" -f $UserId, $incoming.Gold, $incoming.TotalXP) -ForegroundColor Green
+        Write-Host ("Saved profile {0} Gold={1} TotalXP={2} Force={3}" -f $UserId, $incoming.Gold, $incoming.TotalXP, [bool]$Force) -ForegroundColor Green
     } finally {
         [System.Threading.Monitor]::Exit($script:ProfileLock)
     }
@@ -208,8 +237,9 @@ function Send-HttpResponse {
 
     $statusText = switch ($StatusCode) {
         200 { "OK" }
-        404 { "Not Found" }
         400 { "Bad Request" }
+        404 { "Not Found" }
+        409 { "Conflict" }
         default { "Error" }
     }
 
@@ -251,7 +281,7 @@ function Handle-Client {
         if ($method -eq "POST" -and ($path -eq "/log" -or $path -eq "/")) {
             $body = Read-RequestBody -Reader $reader
             if ($body -and $body.Trim().Length -gt 0) {
-                try { Add-Content -Path $LogFile -Value $body -Encoding UTF8 } catch {}
+                Append-SharedLog -Path $LogFile -Text $body
                 Process-LogBodyForProfiles -Body $body
             }
             Send-HttpResponse -Client $Client -StatusCode 200 -Body "ok"
@@ -274,7 +304,12 @@ function Handle-Client {
                 Send-HttpResponse -Client $Client -StatusCode 400 -Body "bad"
             } else {
                 $ok = Save-ProfileJson -UserId $userId -Json $body -Force:$force
-                Send-HttpResponse -Client $Client -StatusCode 200 -Body $(if ($ok) { "saved" } else { "skipped-stale" })
+                if ($ok) {
+                    Send-HttpResponse -Client $Client -StatusCode 200 -Body "saved"
+                } else {
+                    # Не 200: DataService не должен считать skipped-stale успехом
+                    Send-HttpResponse -Client $Client -StatusCode 409 -Body "skipped-stale"
+                }
             }
         }
         else {

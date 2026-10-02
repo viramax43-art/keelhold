@@ -412,6 +412,65 @@ function CharacterRigBuilder.LockStanding(model: Model, facingCF: CFrame?)
 	model:SetAttribute("PoseLocked", true)
 end
 
+--[[
+	Раненый (Downed): валим риг на настил. Корень остаётся Anchored, конечности
+	висят на Motor6D и едут вместе с ним. Health не трогаем — этим управляет
+	BotService.DownBot (Health = 0 убил бы риг и снял модель).
+]]
+function CharacterRigBuilder.DownedPose(model: Model, faceDown: boolean?): boolean
+	local root = getRoot(model)
+	if not root then
+		return false
+	end
+	local pivot = model:GetPivot()
+	local pos = pivot.Position
+	local look = pivot.LookVector
+	local yaw = math.atan2(-look.X, -look.Z) or 0
+	-- ~100° назад (плашмя) или ~75° (на боку), плюс опускаем к настилу
+	local tumble = math.rad(if faceDown == false then -75 else -100)
+	local downedCF = CFrame.new(Vector3.new(pos.X, pos.Y - 2.2, pos.Z))
+		* CFrame.Angles(0, yaw, 0)
+		* CFrame.Angles(tumble, 0, 0)
+	model:PivotTo(downedCF)
+
+	root.Anchored = true
+	root.CanCollide = false
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") and descendant ~= root then
+			descendant.CanCollide = false
+			descendant.CanTouch = false
+			descendant.Massless = true
+		end
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.PlatformStand = true
+	end
+	model:SetAttribute("Downed", true)
+	model:SetAttribute("PoseLocked", true)
+	return true
+end
+
+-- Подъём: сброс позы и возврат в стойку (facingCF = точка обороны слота)
+function CharacterRigBuilder.ClearDownedPose(model: Model, facingCF: CFrame?): boolean
+	local root = getRoot(model)
+	if not root then
+		return false
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.PlatformStand = false
+	end
+	model:SetAttribute("Downed", false)
+	model:SetAttribute("PoseLocked", false)
+	CharacterRigBuilder.LockStanding(model, facingCF)
+	return true
+end
+
 function CharacterRigBuilder.FaceInPlace(model: Model, facingCF: CFrame)
 	local root = getRoot(model)
 	if not root then
